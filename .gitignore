@@ -1,0 +1,27 @@
+# ---- 运行时数据（程序会在 exe / 程序旁边自动创建，绝不进仓库）----
+data/
+downloads/
+backgrounds/
+# 自带的默认提示音要跟着仓库走，用户自己加的其它音效不上传
+sounds/*
+!sounds/bbb.mp3
+
+# ---- 打包产物 ----
+dist/
+build/
+*.spec.bak
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# ---- 临时 / 日志 ----
+*.log
+*.tmp
+tools/_*.py
