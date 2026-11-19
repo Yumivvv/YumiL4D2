@@ -50,6 +50,14 @@ check("提示「还没登录」", "登录" in (res.get("error") or ""), res.get(
 
 print()
 print("=== 3. 三连开关：默认点赞/投币/收藏开、关注关 ===")
+# ★ 先把四个开关重置成出厂默认再断言。
+#   这些值会落盘到 config.json，别的测试或用户手动改过之后，
+#   「默认值」就不再是出厂值了 —— 断言会假失败。
+#   出厂默认：点赞/投币/收藏 = True，关注 = False。
+core.setBiliLike(True)
+core.setBiliCoin(True)
+core.setBiliFav(True)
+core.setBiliFollow(False)
 check("点赞默认开", core.biliLikeOn is True)
 check("投币默认开", core.biliCoinOn is True)
 check("收藏默认开", core.biliFavOn is True)

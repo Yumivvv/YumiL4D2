@@ -108,8 +108,12 @@ def finish():
     print()
     if fails:
         print("失败 %d 项：%s" % (len(fails), fails))
-        sys.exit(1)
+        # 用 os._exit 跳过解释器收尾：core 被回收之后 QML 引擎还在拆树，
+        # 会刷一屏「Cannot read property xxx of null」（那不是被测代码的问题），
+        # 而且会让退出码变成 1，看起来像测试失败。
+        os._exit(1)
     print("全部通过")
+    os._exit(0)
 
 
 QTimer.singleShot(2000, phase1)
