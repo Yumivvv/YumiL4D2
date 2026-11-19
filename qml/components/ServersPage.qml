@@ -2520,9 +2520,12 @@ Item {
                                     elide: Text.ElideRight
                                 }
                                 Text {
-                                    // 现在只按名字分组，不再有「同 IP」组，
-                                    // 所以这里只显示台数。
+                                    // 整组都在同一台机器上（同 IP 不同端口）时额外标一下，
+                                    // 让「模式不同但同一个服主」这件事一眼看得出来。
                                     text: modelData.count + " 台"
+                                          + (modelData.host ? " · 同 IP" : "")
+                                    width: parent.width
+                                    elide: Text.ElideRight
                                     color: Theme.textMute
                                     font.family: Theme.uiFont
                                     font.pixelSize: 9

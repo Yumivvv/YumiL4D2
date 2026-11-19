@@ -264,58 +264,120 @@ def name_prefix(name: str) -> str:
     return ""
 
 
-def server_group(addr: str, name: str) -> str:
-    """算出这台服务器属于哪个「系列」，返回组名（空串 = 不归组）。
-
-    优先用名字前缀；名字切不出前缀时退回「同 IP」分组
-    （用户明确要：「IP 一样端口不一样也能识别到」）。
-    """
-    prefix = name_prefix(name)
-    if prefix:
-        return prefix
-    host = ""
+def host_of(addr: str) -> str:
+    """取 ``host:port`` 里的 host（去掉 IPv6 的方括号）；取不到返回空串。"""
     try:
-        host = split_address(addr)[0] if addr else ""
+        return split_address(addr)[0] if addr else ""
     except (ValueError, IndexError):
-        host = (addr or "").split(":")[0]
-    # IP 分组：至少要有两台同 IP 的才值得成组，但那要在汇总时才知道，
-    # 这里先返回 IP，由 group_list 决定要不要保留。
-    return host or ""
+        return (addr or "").rsplit(":", 1)[0]
+
+
+def server_group(addr: str, name: str) -> str:
+    """这一行**单看自己**能算出的组名：目前就是名字前缀（空串 = 切不出）。
+
+    ★ 注意：真正的合集是 ``group_servers()`` 按**整份列表**算的，
+      因为「同 IP」这条依据要凑够 2 台才算数，单行看不到别人。
+      这个函数只用来给行数据挂一个「名字系列」提示，别拿它当合集来源。
+    """
+    return name_prefix(name)
 
 
 def group_servers(rows: list) -> list:
-    """把服务器按「名字前缀」聚成合集，返回 ``[{key, label, count, addrs}]``。
+    """把服务器聚成合集，返回 ``[{key, label, kind, count, addrs, host}]``。
 
-    ★ 用户明确要求：**只按服务器名分组，不要纯 IP 合集**。
-      以前还会把「名字对不上但 IP 相同」的服按 IP 聚一组，现在不做这件事了 ——
-      IP 相同的几台如果没有共同的名字特征，就老老实实待在「未分类」里。
+    ★ 用户原话：「如果少于 2 个同名类似服务器或 IP 那么弄到未分类里面」——
+      也就是说**同 IP 本来就算一条归类依据**。中间有一版把它砍掉了，
+      只留名字前缀，结果同一台机器上的 27016~27022（模式不同、名字不同）
+      被拆成「一个名字合集 + 几条未分类」，用户又报了一次：
+      「1.70.33.241:27016 到 27022 都有 IP，为什么这两个没分类进去，
+        这其实也算在里面因为 IP 一样，然后就模式不一样而已，应该都搞成一个分类里面」。
 
-    规则：
-      · 只按名字前缀分（「天域1服」「天域2服」→ 天域）
-      · 同一组**至少 2 台**才算合集；只有 1 台的不成组，
-        它和「没名字」「名字切不出前缀」的服一起进「未分类」
+    所以现在是**两条依据取并集**，用并查集合并：
+      1. 名字前缀相同，且这种前缀至少 2 台（「天域1服」「天域2服」→ 天域）
+      2. IP 相同，且这台机器上至少 2 台（27015~27022 模式不同也归一起）
+
+    合并（而不是各算各的）是必须的：同一台机器上如果既有「同前缀的 5 台」
+    又有「名字不同的 2 台」，分开算会得到「一个名字合集 + 2 条未分类」——
+    还是同一个服主的两堆东西，正是用户不想要的。
+
+    组名怎么定：成员里**出现次数最多的名字前缀**，前缀全都不同就退回用 IP。
+    最终**至少 2 台**才算合集，单台的进「未分类」。
     """
     valid = [r for r in (rows or []) if str(r.get("addr") or "")]
+    if not valid:
+        return []
 
-    def addr_of(r):
-        return str(r["addr"])
+    addrs = [str(r["addr"]) for r in valid]
 
     def name_of(r):
         return r.get("name") or r.get("liveName") or ""
 
-    by_prefix: dict[str, list] = {}
-    for r in valid:
-        key = name_prefix(name_of(r))
-        if key:
-            by_prefix.setdefault(key, []).append(r)
+    prefixes = [name_prefix(name_of(r)) for r in valid]
+    hosts = [host_of(a) for a in addrs]
+
+    # ---- 并查集：同前缀 / 同 IP 都是「一条边」
+    parent = list(range(len(valid)))
+
+    def find(i: int) -> int:
+        root = i
+        while parent[root] != root:
+            root = parent[root]
+        while parent[i] != root:      # 路径压缩
+            parent[i], i = root, parent[i]
+        return root
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    def link_by(values: list[str]) -> None:
+        """把值相同的下标连起来，但只有该值出现 ≥2 次才算。"""
+        buckets: dict[str, list[int]] = {}
+        for i, v in enumerate(values):
+            if v:
+                buckets.setdefault(v.lower(), []).append(i)
+        for idx in buckets.values():
+            if len(idx) >= 2:
+                for j in idx[1:]:
+                    union(idx[0], j)
+
+    link_by(prefixes)     # 1) 同名字系列
+    link_by(hosts)        # 2) 同一台机器（同 IP 不同端口）
+
+    comps: dict[int, list[int]] = {}
+    for i in range(len(valid)):
+        comps.setdefault(find(i), []).append(i)
 
     out: list[dict] = []
-    for key, members in by_prefix.items():
-        if len(members) < 2:
-            continue          # 单台的不成组 → 落到「未分类」
-        addrs = [addr_of(r) for r in members]
-        out.append({"key": "n:" + key, "label": key, "kind": "name",
-                    "count": len(members), "addrs": addrs})
+    for idx in comps.values():
+        if len(idx) < 2:
+            continue          # 单台不成组 → 落到「未分类」
+        picked = [prefixes[i] for i in idx if prefixes[i]]
+        label, kind = "", "ip"
+        if picked:
+            counts: dict[str, int] = {}
+            for p in picked:
+                counts[p] = counts.get(p, 0) + 1
+            # 台数最多的那个前缀当组名；平票时取更长的（更具体）、再按字典序。
+            # ★ 但**至少要有 2 台共用**才配当组名 —— 一台一个前缀的机器
+            #   （名字全是各叫各的）用 IP 当组名才不误导人。
+            best = max(counts, key=lambda k: (counts[k], len(k), k))
+            if counts[best] >= 2:
+                label = best
+                kind = "name"
+        group_host = hosts[idx[0]]
+        if not label:
+            label = group_host or "合集"
+        out.append({
+            "key": ("n:" if kind == "name" else "i:") + label,
+            "label": label,
+            "kind": kind,
+            "count": len(idx),
+            "addrs": [addrs[i] for i in idx],
+            # 整组都在同一台机器上 → 界面上可以标「同 IP」
+            "host": group_host if all(h == group_host for h in (hosts[i] for i in idx)) else "",
+        })
 
     out.sort(key=lambda g: (-g["count"], g["label"]))
     return out
@@ -1189,10 +1251,10 @@ class ServerManager(QObject):
     def groups(self) -> list:
         """当前列表里的「合集」，给界面的合集选择器用。
 
-        每项：``{key, label, count, addrs, kind}``。
+        每项：``{key, label, count, addrs, kind, host}``。
         头部固定带两项：
           · ``key="all"``   全部服务器
-          · ``key="none"``  未分类（不属于任何名字合集的服）
+          · ``key="none"``  未分类（凑不成 2 台的散服）
         这样选择器里永远是「全部 / 未分类 / 各合集」，用户不用猜。
         """
         rows = self._merged()
