@@ -1645,14 +1645,46 @@ class ModManager(QObject):
 
     @Slot(str)
     def identifyOne(self, path: str) -> None:
-        """识别单个 mod。"""
+        """识别单个 mod（重新查一次工坊信息）。
+
+        ★ 工坊 ID 有**两个来源**，以前只用了第一个，于是「明明有工坊 ID 却检查不了」：
+          1. 文件名是纯数字（工坊下载的 `<ID>.vpk`）—— `M.workshop_id_of()`
+          2. 列表里这一条已经带 `workshopId`（从元数据/上次识别/工坊目录推断出来的）
+             用户的 MOD 改名成中文、或者手动挪动过之后，文件名不再纯数字，
+             但它其实是工坊来的、详情里也显示着工坊信息 —— 这种必须照样能检查。
+        """
         wid = M.workshop_id_of(os.path.basename(path))
         if not wid:
-            self._set_status("这个 mod 不是工坊 ID 命名，没法识别")
-            self.toast("这个 MOD 不是工坊 ID 命名，没法识别", "warn")
+            wid = self._workshop_id_of_path(path)
+        if not wid:
+            self._set_status("这个 mod 没有工坊 ID，没法识别")
+            self.toast("这个 MOD 没有工坊 ID，没法识别", "warn")
             return
         self._set_status(f"正在查询工坊 {wid}…")
         threading.Thread(target=self._identify_one_worker, args=(wid,), daemon=True).start()
+
+    def _workshop_id_of_path(self, path: str) -> str:
+        """从已有列表数据里找这个 path 对应的工坊 ID（找不到返回空串）。
+
+        按 id / path / stem 三种键都试一遍：详情面板传进来的 `path` 可能是
+        绝对路径，也可能已经被规范化过，用 stem（不含扩展名的文件名）兜底最稳。
+        """
+        target = str(path or "")
+        if not target:
+            return ""
+        base = os.path.basename(target)
+        stem = os.path.splitext(base)[0]
+        for item in list(self._all_local) + list(self._all_workshop):
+            wid = str(item.get("workshopId") or "").strip()
+            if not wid:
+                continue
+            if target in (str(item.get("path") or ""), str(item.get("id") or "")):
+                return wid
+            if stem and stem == str(item.get("stem") or ""):
+                return wid
+            if base and base == os.path.basename(str(item.get("path") or "")):
+                return wid
+        return ""
 
     def _identify_one_worker(self, wid: str) -> None:
         info = self._wsc.fetch([wid]).get(wid) or {}

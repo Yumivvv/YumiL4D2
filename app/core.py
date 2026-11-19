@@ -1424,17 +1424,77 @@ class Core(QObject):
         elif mid > 0:
             skipped.append("关注")
 
-        ok = bool(done) and not errors
-        msg = "、".join(done) if done else ""
-        if errors:
-            msg = "；".join(errors)
-        if ok:
-            self.toast(f"已支持创作者：{msg}", "ok")
-            self._set_status(f"三连成功：{msg}")
-        elif errors:
+        # ★ 部分成功也要说成功的那部分。
+        #   以前这里是 `ok = bool(done) and not errors`，只要有一项失败
+        #   （最典型就是投币：硬币不足 / 等级不够）整条就被判失败，
+        #   界面只显示「投币失败：…」，用户根本看不出「点赞和收藏其实已经成了」。
+        #   现在分成：done 成功项、errors 失败项，两个都往界面传，
+        #   ok 表示「至少成功了一项」。
+        ok = bool(done)
+        if done and errors:
+            msg = "；".join(errors) + "（已完成：" + "、".join(done) + "）"
             self._set_status(msg)
             self.toast(msg, "warn")
-        return {"ok": ok, "done": done, "skipped": skipped, "error": msg}
+        elif done:
+            msg = "、".join(done)
+            self.toast(f"已支持创作者：{msg}", "ok")
+            self._set_status(f"三连成功：{msg}")
+        else:
+            msg = "；".join(errors) if errors else "什么都没做"
+            self._set_status(msg)
+            self.toast(msg, "warn" if errors else "info")
+        return {"ok": ok, "done": done, "skipped": skipped, "error": msg,
+                "errors": errors}
+
+    @Slot(str, result="QVariantMap")
+    def biliFollowAuthor(self, mid: str) -> dict:
+        """关注 / 取关某个 UP 主（作者名片里那颗「关注」按钮用）。
+
+        没登录时**不偷偷失败**：返回 ``{ok: False, needLogin: True}``，
+        让界面弹扫码登录（和详情面板点三连的处理一致）。
+        """
+        target = 0
+        try:
+            target = int(str(mid or "").strip() or 0)
+        except (TypeError, ValueError):
+            target = 0
+        if target <= 0:
+            return {"ok": False, "following": False, "needLogin": False,
+                    "error": "这个作者没有 UID，关注不了"}
+        if not self.client.logged_in():
+            return {"ok": False, "following": False, "needLogin": True,
+                    "error": "还没登录"}
+        # 校验一次登录态，失效就别瞎试写接口
+        user = self.client.nav_user()
+        if not user:
+            self.client.clear_credentials()
+            self.config["bili_credentials"] = {}
+            self.config.save()
+            self._bili_user = {}
+            self.statusChanged.emit()
+            return {"ok": False, "following": False, "needLogin": True,
+                    "error": "登录已失效，请重新扫码登录"}
+
+        following = bool(self.biliFollowing(target))
+        r = self.client.follow_user(target, not following)
+        if r.get("ok"):
+            now = not following
+            msg = "已关注" if now else "已取消关注"
+            self.toast(msg, "ok")
+            self._set_status(msg)
+            return {"ok": True, "following": now, "needLogin": False, "error": ""}
+        error = str(r.get("human") or r.get("message") or r.get("code") or "关注失败")
+        self.toast(f"关注失败：{error}", "warn")
+        return {"ok": False, "following": following, "needLogin": False,
+                "error": error}
+
+    @Slot(int, result=bool)
+    def biliFollowing(self, mid: int) -> bool:
+        """当前账号有没有关注这个 UP 主（查失败就当没关注）。"""
+        try:
+            return bool(self.client.following(int(mid or 0)))
+        except Exception:  # noqa: BLE001 —— 关注状态查不到不该拦着用户点
+            return False
 
     @Slot(result="QVariantList")
     def biliFavorites(self) -> list:

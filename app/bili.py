@@ -147,6 +147,8 @@ class BiliClient:
     FAV_FOLDERS_API = "https://api.bilibili.com/x/v3/fav/folder/created/list-all"
     FAV_ADD_API = "https://api.bilibili.com/x/v3/fav/resource/deal"
     FOLLOW_API = "https://api.bilibili.com/x/relation/modify"
+    # 查「我对某人的关注状态」：attribute 2 = 已关注，6 = 互相关注
+    RELATION_API = "https://api.bilibili.com/x/relation"
     # nav 接口用来查「现在到底登录没 / 登录的是谁」
     NAV_API_LOGIN = "https://api.bilibili.com/x/web-interface/nav"
 
@@ -427,6 +429,29 @@ class BiliClient:
                 "re_src": 11,
             },
         )
+
+    def following(self, mid: int) -> bool:
+        """当前账号有没有关注这个 UP 主。
+
+        用 `/x/relation` 查一次（`attribute` 里 2 = 已关注、6 = 互相关注）。
+        查不到就当「没关注」—— 界面据此显示「关注」还是「已关注」。
+        """
+        target = int(mid or 0)
+        if target <= 0 or not self.logged_in():
+            return False
+        try:
+            data = self._get_json(
+                self.RELATION_API,
+                {"fid": target},
+                "https://space.bilibili.com/",
+            )
+        except BiliError:
+            return False
+        try:
+            attribute = int((data or {}).get("attribute") or 0)
+        except (TypeError, ValueError):
+            return False
+        return attribute in (2, 6)
 
     # ------------------------------------------------------------- WBI 签名
     def _wbi_mixin_key(self) -> str:

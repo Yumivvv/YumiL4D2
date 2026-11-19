@@ -1432,14 +1432,24 @@ Window {
                             onCopyDesc: function (v) { core.copyDesc(v); }
                             // 分享：标题 + 视频链接 + 网盘链接和提取码，一次复制全
                             onShareVideo: function (v) { core.shareVideo(v); }
-                            // 三连：调后端，返回 done 列表让用户看到「已点赞、已投币」
+                            // 三连：调后端，返回 done / errors 两个列表。
+                            // ★ 后端现在**部分成功也算成功**（ok = 至少成功一项），
+                            //   所以这里把「做成了哪些」和「哪些没做成」一起显示，
+                            //   不再因为投币失败就把点赞收藏的成功回执吞掉。
                             onTriple: function (bvid) {
                                 if (!bvid)
                                     return;
                                 var res = core.biliTriple(bvid);
-                                if (res && res.ok) {
-                                    win.toast("已支持创作者：" + (res.done || []).join("、"), "ok");
-                                } else if (res && (res.error || "").length > 0) {
+                                if (!res)
+                                    return;
+                                var doneList = res.done || [];
+                                var errList = res.errors || [];
+                                if (doneList.length > 0 && errList.length > 0) {
+                                    win.toast("已支持创作者：" + doneList.join("、")
+                                              + "；" + errList.join("；"), "warn");
+                                } else if (doneList.length > 0) {
+                                    win.toast("已支持创作者：" + doneList.join("、"), "ok");
+                                } else if ((res.error || "").length > 0) {
                                     win.toast(res.error, "warn");
                                 }
                             }
@@ -1494,6 +1504,8 @@ Window {
                                 win.authorOpen = true;
                                 win.authorLoading = true;
                                 win.authorInfo = core.findVideo(bvid);
+                                // 先按「未关注」摆着，作者信息回来后再查一次真实状态
+                                authorCard.following = false;
                                 core.openAuthor(bvid);
                             }
                         }
@@ -6149,6 +6161,18 @@ Window {
                 win.authorOpen = false;
                 win.openDetail(bvid);
             }
+            // 关注 UP 主：没登录就先弹扫码登录（和三连的处理一致）
+            onFollowRequested: function (mid) {
+                var res = core.biliFollowAuthor(mid);
+                if (res && res.needLogin === true) {
+                    win.toast("关注 UP 主要先登录 B 站账号", "info");
+                    win.biliSwitchMode = false;
+                    biliLoginDlg.open();
+                    return;
+                }
+                if (res && res.ok === true)
+                    authorCard.following = res.following === true;
+            }
         }
 
         // ------------------------------------------------ 窗口边缘拖拽调整大小
@@ -6277,6 +6301,8 @@ Window {
         function onAuthorReady(info) {
             win.authorInfo = info;
             win.authorLoading = false;
+            // 顺手把「有没有关注他」也查出来，名片上的按钮才能显示对
+            authorCard.following = core.biliFollowing(parseInt(info.mid || 0, 10));
         }
         function onAuthorFailed(msg) {
             win.authorLoading = false;

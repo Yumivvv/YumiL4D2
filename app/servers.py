@@ -884,16 +884,18 @@ def _time_text(secs: int) -> str:
 #   3. **地址是域名**（`jssx.trygek.com:18931` 这类国服常用的跳板域名）——
 #      Steam 的 `steam://connect/` 只吃字面 IP，吃到域名就停在
 #      `ExecCommandLine:` 那一行，不报错、也不启动游戏（实测 D:\Steam\logs\console_log.txt）；
-#   4. **游戏已经在跑** —— Steam 会把 `steam://connect/` 当成「又一次启动 550」，
-#      走 `WaitingPrevProcess` 然后 Completed，不再把 `+connect` 传给已经在跑的那个进程。
+#   4. **游戏已经在跑** —— 老写法 `steam://connect/<ip>:<port>` 会被 Steam 当成
+#      「又一次启动 550」，走 `WaitingPrevProcess` 然后 Completed，看起来没反应；
+#      但 `steam://connect/<ip>:<port>/rungameid/550`（带 appid）**能**让已经在跑的
+#      进程连过去 —— 这是用户实测指出来的（「并非打开游戏后就不能进服务器了」）。
 #
-# 所以正确的做法不是「把 URL 丢给系统」，而是自己把这三件事办掉：
+# 所以正确的做法不是「把 URL 丢给系统」，而是自己把这几件事办掉：
 #   * 域名先自己解析成 IP（`resolve_host`），再交给 Steam；
 #   * 游戏没跑就用 `steam://connect/` 让它带 `+connect` 起来（这条路实测最稳）；
-#   * 游戏在跑就把它窗口拉起来，把 `connect ip:port` 塞进剪贴板并提示玩家
-#     在控制台里粘一下 —— 因为 Source 引擎没有外部「让运行中的进程执行命令」
-#     的口子，`-applaunch 550 +connect` 也只会被 Steam 回一句
-#     `>>> command not found: connect`。
+#   * 游戏在跑就优先试 `steam://connect/<ip>:<port>/rungameid/550`；
+#     万一系统没交出去，才退回「把 `connect ip:port` 塞剪贴板 + 提示玩家去控制台粘」——
+#     因为 Source 引擎没有外部「让运行中的进程执行命令」的口子，
+#     `-applaunch 550 +connect` 也只会被 Steam 回一句 `>>> command not found: connect`。
 # ---------------------------------------------------------------------------
 STEAM_APPID = "550"                       # Left 4 Dead 2
 _STEAM_CACHE: dict[str, Any] = {}
@@ -2342,8 +2344,27 @@ class ServerManager(QObject):
             self._set_status(f"{target} → 解析成 {steam_target}")
 
         if game_running():
-            # 游戏已经在跑：Steam 认的 `steam://connect/` 会被当成「又启动一次」然后
-            # 什么都不做，所以走剪贴板 + 提示这条路（控制台命令一定是好使的）。
+            # ★ 游戏已经在跑 ≠ 连不上服务器。
+            #   用户实测并明确指出：`steam://connect/<ip>:<port>/rungameid/550`
+            #   这种带 appid 的写法，**游戏开着也能让正在运行的那个进程连过去**
+            #   （Steam 会把它当成「给 550 传一条启动参数」，已经跑起来的进程会接住）。
+            #   以前这里直接走「复制命令 + 让用户自己开控制台」，等于把一个本来能用的
+            #   功能做成了半手动，用户的原话就是「并非打开游戏后就不能进服务器了」。
+            #
+            #   所以现在：先试带 rungameid 的 URL，失败再退回剪贴板 + 控制台提示。
+            url = f"steam://connect/{steam_target}/rungameid/{STEAM_APPID}"
+            ok = _open_url(url)
+            if ok:
+                self._bring_game_foreground()
+                msg = f"正在让已经在运行的游戏连接 {steam_target}"
+                self._set_status(msg)
+                if notify:
+                    self._toast(msg, "ok")
+                return {"ok": True, "addr": target, "steamTarget": steam_target,
+                        "how": "steam-running", "url": url, "message": msg,
+                        "error": ""}
+
+            # 走到这里说明系统没把 URL 交出去：老办法，复制控制台命令
             cmd = f"connect {steam_target}"
             copied = self._clipboard(cmd)
             self._bring_game_foreground()
@@ -2356,7 +2377,9 @@ class ServerManager(QObject):
                     "how": "console", "command": cmd, "copied": copied,
                     "message": msg, "error": ""}
 
-        url = f"steam://connect/{steam_target}"
+        # 游戏没在跑：同样用带 appid 的写法 —— Steam 会带着 `+connect` 把 550 启动起来。
+        # 两条路用同一个 URL 形状，行为更可预期，也省得维护两套。
+        url = f"steam://connect/{steam_target}/rungameid/{STEAM_APPID}"
         ok = _open_url(url)
         if not ok:
             msg = "唤起 Steam 失败，可以从任务管理器把 Steam 彻底关掉再试"
@@ -2365,8 +2388,7 @@ class ServerManager(QObject):
                 self._toast(msg, "error")
             return {"ok": False, "addr": target, "error": msg}
 
-        msg = f"正在用 Steam 连接 {steam_target}" + (
-            "（游戏可能要几十秒才起来）" if not game_running() else "")
+        msg = f"正在用 Steam 连接 {steam_target}（游戏可能要几十秒才起来）"
         self._set_status(msg)
         if notify:
             self._toast(msg, "ok")
@@ -2420,10 +2442,17 @@ class ServerManager(QObject):
 
     @Slot(str, result=str)
     def connectUrl(self, addr: str) -> str:
+        """给界面「复制链接」用的 Steam 连接 URL。
+
+        ★ 带上 `/rungameid/550`：这种写法**游戏开着也能直接连进服务器**
+          （用户实测指出）。不带 appid 的老写法在游戏已运行时会被 Steam 当成
+          「再启动一次 550」然后什么都不做，看起来就是「点了进不去」。
+        """
         try:
-            return f"steam://connect/{normalize_address(addr)}"
+            target = normalize_address(addr)
         except ServerError:
             return ""
+        return f"steam://connect/{target}/rungameid/{STEAM_APPID}"
 
     def _clipboard(self, text: str) -> bool:
         try:
@@ -2477,7 +2506,7 @@ class ServerManager(QObject):
         return {"ok": warn == "", "addr": addr,
                 "steamTarget": steam_target,
                 "command": f"connect {steam_target}",
-                "url": f"steam://connect/{steam_target}",
+                "url": f"steam://connect/{steam_target}/rungameid/{STEAM_APPID}",
                 "error": warn}
 
     @Slot(str, result="QVariantMap")

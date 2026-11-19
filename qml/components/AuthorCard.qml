@@ -28,6 +28,11 @@ Item {
     signal openSpace(string mid)
     signal openUpload(string mid)
     signal openVideoDetail(string bvid)   // 点视频卡片：打开的是视频详情，不是直接播放
+    // 点「关注」：登录了就直接关注/取关；没登录由主窗口弹扫码登录
+    signal followRequested(string mid)
+
+    // 当前有没有关注这位 UP 主（主窗口查询后回填）
+    property bool following: false
 
     visible: open
     z: 320
@@ -185,9 +190,21 @@ Item {
                 width: parent.width
                 spacing: 8
 
+                // 关注：登录了才写得进（没登录点它会弹扫码登录，见主窗口）
+                // 已关注时按钮变普通样式、文字改成「已关注」，再点就是取关
+                ActionButton {
+                    objectName: "authorFollowBtn"
+                    label: root.following ? "已关注" : "关注"
+                    accent: !root.following
+                    width: parent.width * 0.32
+                    height: 34
+                    enabledBtn: (root.author.mid || 0) > 0
+                    onClicked: root.followRequested(String(root.author.mid || ""))
+                }
                 ActionButton {
                     label: "前往主页"
-                    width: parent.width * 0.48
+                    accent: false
+                    width: parent.width * 0.32
                     height: 34
                     enabledBtn: (root.author.mid || 0) > 0
                     onClicked: root.openSpace(String(root.author.mid || ""))
@@ -195,7 +212,7 @@ Item {
                 ActionButton {
                     label: "全部投稿"
                     accent: false
-                    width: parent.width * 0.48
+                    width: parent.width * 0.32
                     height: 34
                     enabledBtn: (root.author.mid || 0) > 0
                     onClicked: root.openUpload(String(root.author.mid || ""))

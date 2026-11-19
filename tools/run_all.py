@@ -86,6 +86,7 @@ DEFAULT_SUITE = [
     "translate_test",
     "archive_import_test",
     "round18_test",
+    "round21_test",
     "round12_test",
     "round12_ui_test",
     "round13_test",

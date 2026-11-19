@@ -203,7 +203,7 @@ def main() -> int:
     p = mgr.parseAddress("42.193.137.24")
     check("IP 直连只填 IP 就补端口", p.get("ok") and p.get("addr") == "42.193.137.24:27015", p)
     check("IP 直连给两套命令", p.get("command") == "connect 42.193.137.24:27015"
-          and p.get("url") == "steam://connect/42.193.137.24:27015", p)
+          and p.get("url") == "steam://connect/42.193.137.24:27015/rungameid/550", p)
     p2 = mgr.parseAddress("乱写的东西")
     check("IP 直连也拦非法输入", not p2.get("ok"), p2)
 
@@ -242,8 +242,11 @@ def main() -> int:
     check("连服命令是 connect <地址>",
           mgr.connectCommand("42.193.137.24") == "connect 42.193.137.24:27015",
           mgr.connectCommand("42.193.137.24"))
-    check("steam 链接是 steam://connect/<地址>",
-          mgr.connectUrl("42.193.137.24") == "steam://connect/42.193.137.24:27015",
+    # ★ 必须带 /rungameid/550：不带 appid 的老写法在游戏已运行时会被 Steam
+    #   当成「再启动一次 550」然后什么都不做（用户报的「打开了游戏就进不去」）。
+    check("steam 链接带 appid（游戏开着也能连）",
+          mgr.connectUrl("42.193.137.24")
+          == "steam://connect/42.193.137.24:27015/rungameid/550",
           mgr.connectUrl("42.193.137.24"))
 
     mgr.removeServer("46.174.51.126:27015")
