@@ -4569,7 +4569,8 @@ Window {
                         }
 
                         // 检查更新：走 GitHub Releases（网络逻辑见 app/updater.py）。
-                        // 有新版时按钮变强调色，点开弹窗看版本号和更新日志。
+                        // ★ 点按钮只发起后台检查，**不弹窗**；只有确实发现新版本时
+                        //   由 core.updatePrompt 触发弹窗（见下方 Connections）。
                         ActionButton {
                             objectName: "checkUpdateBtn"
                             width: parent.width
@@ -4577,10 +4578,7 @@ Window {
                             label: core.updateChecking ? "正在检查…" : "检查更新"
                             accent: core.updateInfo.has_update
                             enabledBtn: !core.updateChecking
-                            onClicked: {
-                                updateDlg.open();
-                                core.checkUpdate();
-                            }
+                            onClicked: core.checkUpdate()
                         }
 
                         Text {
@@ -6286,6 +6284,10 @@ Window {
         function onNewItemsFound(items) {
             win.pendingNew = items;
             win.updateBanner();
+        }
+        // 检查更新：只有确实发现新版本才弹窗提示去下载；平时检查不弹任何窗口
+        function onUpdatePrompt() {
+            updateDlg.open();
         }
         // 动作型提示：复制 / 导入 / 删除 / 转换… 统一走这个会淡出的浮层
         function onToastRequested(text, level) {

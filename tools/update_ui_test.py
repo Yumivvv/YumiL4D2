@@ -5,6 +5,7 @@
   2. 手动检查的链路：有新版 / 出错时，弹窗里的文字和按钮怎么变
   3. 设置页的「自动检测更新」开关（默认关，开关能写进配置）
   4. 源码里的约定（按钮名、弹窗名、label 分支）
+  5. 检查过程**不弹窗**，只有发现新版本才由 updatePrompt 弹出来
 
 网络一律不打：直接把 core._update_info 塞进去看 QML 怎么显示。
 """
@@ -85,8 +86,11 @@ def phase1():
     check("配置里有 auto_check_update 键", "auto_check_update" in core.config.data)
 
     src = open(os.path.join(ROOT, "qml", "Main.qml"), encoding="utf-8").read()
-    check("关于页按钮点开弹窗并检查",
-          'objectName: "checkUpdateBtn"' in src and "updateDlg.open()" in src)
+    check("关于页按钮只发起检查、不直接弹窗",
+          'objectName: "checkUpdateBtn"' in src
+          and "onClicked: core.checkUpdate()" in src)
+    check("发现新版时由 updatePrompt 触发弹窗",
+          "onUpdatePrompt" in src and "updateDlg.open()" in src)
     check("弹窗对象名是 updateDlg", 'objectName: "updateDlg"' in src)
     check("状态文字有「发现新版本」分支", "发现新版本" in src)
     check("状态文字有「已是最新版本」分支", "当前已是最新版本" in src)
@@ -190,6 +194,53 @@ def phase5(status, note, download):
     check("开关关掉后属性为假", core.property("autoCheckUpdate") is False)
     check("配置已还原", core.config["auto_check_update"] is False)
 
+    phase6(win.findChild(object, "updateDlg"))
+
+
+def phase6(dlg):
+    print()
+    print("=== 6. 检查过程不弹窗，只有发现新版才弹 ===")
+    check("core 有 updatePrompt 信号", hasattr(core, "updatePrompt"))
+    dlg.close()
+    QTimer.singleShot(250, lambda: _p6_closed(dlg))
+
+
+_p6_orig = {}
+
+
+def _p6_closed(dlg):
+    check("先确认弹窗是关着的", dlg.property("opened") is False,
+          str(dlg.property("opened")))
+    # 手动点检查、且服务端没有新版 → 不许弹窗（只 toast 一句）
+    # ★ 补丁要等 worker 线程真的跑完再还原，否则线程可能读到已还原的真函数去联网
+    import app.core as coremod
+
+    _p6_orig["fn"] = coremod.check_update
+    coremod.check_update = lambda repo, cur: {
+        "has_update": False, "current": cur, "latest": cur,
+        "note": "", "url": "", "error": "",
+    }
+    core.checkUpdate()
+    QTimer.singleShot(700, lambda: _p6_no_popup(dlg))
+
+
+def _p6_no_popup(dlg):
+    import app.core as coremod
+
+    if "fn" in _p6_orig:
+        coremod.check_update = _p6_orig["fn"]
+    check("没有新版时检查完不弹窗", dlg.property("opened") is False,
+          str(dlg.property("opened")))
+    check("检查已经结束", core.property("updateChecking") is False)
+    # 有新版 → updatePrompt 发出来就该弹
+    core.updatePrompt.emit()
+    QTimer.singleShot(350, lambda: _p6_prompt(dlg))
+
+
+def _p6_prompt(dlg):
+    check("updatePrompt 一到就弹窗", dlg.property("opened") is True,
+          str(dlg.property("opened")))
+    dlg.close()
     finish()
 
 

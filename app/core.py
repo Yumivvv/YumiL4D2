@@ -271,6 +271,9 @@ class Core(QObject):
     _oneSig = Signal(str)
     # 软件更新：检查中 / 下载中 / 结果（updateInfo）变化时发，QML 据此刷新「关于」里的检查更新弹窗
     updateChanged = Signal()
+    # 只有「确实发现新版本」时才发：QML 收到才弹窗提示下载，
+    # 检查过程本身不弹任何窗口（用户要求：检查版本不要弹窗）
+    updatePrompt = Signal()
 
     def __init__(self, app: QGuiApplication, parent=None):
         super().__init__(parent)
@@ -321,7 +324,7 @@ class Core(QObject):
         self._lock = threading.Lock()
 
         # 软件更新状态：updateInfo 供「关于」里的检查更新弹窗读；
-        # _auto_check_requested 用来区分「启动自动检查」和用户手动点检查
+        # _update_manual 区分「用户手动点检查」和「启动自动检查」
         self._update_info: dict[str, Any] = {
             "has_update": False,
             "current": "",
@@ -332,7 +335,8 @@ class Core(QObject):
         }
         self._update_checking = False
         self._update_downloading = False
-        self._auto_check_requested = False
+        # 用户手动点的检查才提示「已是最新 / 检查失败」，启动自动检查保持安静
+        self._update_manual = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(int(self.config["interval_min"]) * 60 * 1000)
@@ -2249,17 +2253,20 @@ class Core(QObject):
         self.statusChanged.emit()
 
     def _auto_check_once(self) -> None:
-        """启动时按设置静默检查一次（不弹检查弹窗，只在有新版时提示一句）。"""
+        """启动时按设置静默检查一次：**不弹窗**，只有发现新版才提示去下载。"""
         if not bool(self.config["auto_check_update"]):
             return
-        self._auto_check_requested = True
-        self.checkUpdate()
+        self._start_check(manual=False)
 
     @Slot()
     def checkUpdate(self) -> None:
-        """检查 GitHub Releases 上的新版本（后台线程，结果经 updateChanged 回主线程）。"""
+        """「关于」里的检查更新按钮：后台检查，**不弹窗**，只有发现新版才提示下载。"""
+        self._start_check(manual=True)
+
+    def _start_check(self, manual: bool) -> None:
         if self._update_checking:
             return
+        self._update_manual = manual
         self._update_checking = True
         self.updateChanged.emit()
         threading.Thread(target=self._check_update_worker, daemon=True).start()
@@ -2279,17 +2286,20 @@ class Core(QObject):
                 "error": f"检查更新失败：{e}",
             }
         info["current"] = APP_VERSION
+        manual = self._update_manual
         self._update_info = info
         self._update_checking = False
         self.updateChanged.emit()
-        if (
-            self._auto_check_requested
-            and not info.get("error")
-            and info.get("has_update")
-        ):
-            self.toast(
-                f"发现新版本 {info.get('latest')}，可在「关于」里查看更新", "info"
-            )
+
+        if info.get("has_update"):
+            # 只有确实发现新版本才弹窗；检查过程本身不弹任何窗口
+            self.updatePrompt.emit()
+        elif manual:
+            # 手动点检查才回一句结果，启动自动检查保持安静
+            if info.get("error"):
+                self.toast(f"检查更新失败：{info.get('error')}", "warn")
+            else:
+                self.toast("当前已是最新版本", "ok")
 
     @Slot()
     def downloadUpdate(self) -> None:

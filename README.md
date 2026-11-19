@@ -2760,19 +2760,58 @@ protocol、map/folder/game/appid/人数/版本、Valve 彩色控制字符、方�
 `setAutoCheckUpdate()`），QML 只通过 `core.updateInfo`（6 键：`has_update / current / latest / note / url / error`）、
 `core.updateChecking`、`core.updateDownloading` 三个属性读结果，`updateChanged` 信号触发刷新。
 
+**检查时不弹任何窗口**：点「检查更新」只在后台跑，`core.updatePrompt` 信号只在**确实发现新版本**时才发，
+QML 收到才打开弹窗提示去下载（见 `Main.qml` 里的 `onUpdatePrompt`）。手动检查时如果已是最新 / 检查失败，
+只用右下角 toast 回一句；启动自动检查则完全安静。
+
 - **版本解析**取字符串里**第一段 `x.y.z`**，不足补 0，所以 `工具箱_1.0.10` 能正确解析（注意不能用「把所有数字抓出来」的写法，
   会被标题里的 `L4D2` 的 4、2 搅乱）。
 - **更新日志**：聚合所有**比当前版本新**的 release，每条格式 `【tag】\n正文`，按版本从旧到新排。
-- **镜像兜底**：GitHub API 直连不通时，遍历 8 个镜像前缀访问 `…/releases/latest`，只认**跳转后的 URL 里有没有 `/tag/`**
-  （镜像对 API 返回的是 403 网页，不能靠 HTTP 状态码判断）。拿到 tag 后再抓 `releases/expanded_assets/{tag}` 解析出下载链接。
 - **选包**：优先 `.exe`，其次 `.zip`；空列表要判空，别直接取 `[0]`。
 - **安装**：下载到临时目录 → 校验前 2 字节是 `PK`（是 zip 就解开找 `.exe`，裸 exe 直接用）→ 当前 exe 改名 `.old` →
   新文件 `os.replace` 回去，任何一步失败都回滚 `.old`。
-- **自动检测**：`config["auto_check_update"]`，启动 2 秒后在后台线程检查一次；发现新版只弹 toast 提示，**不自动下载**。
+- **自动检测**：`config["auto_check_update"]`，启动 2 秒后在后台线程检查一次；发现新版只弹提示，**不自动下载**。
 
-回归测试：`tools/update_check_test.py`（纯逻辑 30 条断言，覆盖版本解析 / 选包 / 直连成功 / 镜像兜底 / 全失败 / 下载替换与回滚）、
-`tools/update_ui_test.py`（5 节，覆盖按钮与弹窗的四种状态、几何不越界、开关写配置）。
-两个测试脚本开头都把扫描 worker 换成空操作，避免退出时后台线程还在跑、踩到「ModListModel 已析构」的崩溃。
+#### 为什么以前「检查更新」一直转圈（已修）
+
+★ **两个独立的原因叠加，实测都能复现。**
+
+**原因一：8 个镜像站是串行探测的。** 排除后实测各源耗时（超时 8 秒）：
+
+| 源 | 耗时 | 结果 |
+| --- | --- | --- |
+| `gh-proxy.com` | **9.4s** | 读超时 |
+| `ghproxy.net` | **9.8s** | 读超时 |
+| `ghproxy.cxkpro.top` | **8.4s** | 断连 |
+| `ghfast.top` | 2.7s | 断连 |
+| `hk.gh-proxy.com` | 3.2s | 500 |
+| `gh.acmsz.top` | 4.2s | 200（唯一可用） |
+
+按原顺序要挨到第 5 个才成功，**累计约 26 秒**——用户看到的就是「一直加载」。
+现在改成 `ThreadPoolExecutor` **并发探测全部镜像**，`as_completed` 拿到第一个成功结果立刻返回，
+慢源直接放弃（`shutdown(wait=False)`），不再等它们超时。
+
+**原因二：证书校验。** 国内常见的 GitHub 加速工具（Steam++ / Watt Toolkit 等）会在本机做 MITM，
+把自己的根证书装进 **Windows 证书库**。浏览器信、Go 程序（参考实现 lytvpk 就是 Go）也信，
+但 Python 的 `requests` 默认只信 `certifi` 里那份列表——于是 `api.github.com` 直接
+`SSLCertVerificationError`（0.2 秒就失败），只能退回慢镜像。
+现在 `/app/updater.py` 自建 SSLContext：`ssl.create_default_context()` 先加载**系统证书库**，
+再 `load_verify_locations(certifi.where())` **追加** certifi 的 CA，两边都信；
+并用一个全局 `requests.Session` 复用 TLS 连接（第二次起免握手）。
+
+改造后实测：`check_update` 端到端 **2.4 秒**，其中直连 API **0.7 秒**就拿到真实 release 数据。
+
+> 参考实现 `C:\Users\ZengDeRong\Desktop\lytvpk-master\internal\app\update.go` 之所以「秒查」，
+> 是因为它用 Go 的 `http.Client`（默认走系统证书库，MITM 环境也能直连），
+> 且它的 `TestMirrorsLatency` / `GetMirrorsWithLatency` 用 `go func` + `sync.WaitGroup` **并发探测**所有镜像。
+> 我们之前既用了 certifi 又串行遍历，两个坑一起踩了。
+
+回归测试：`tools/update_check_test.py`（含「证书与统一 HTTP 出口」4 条 + 版本解析 + 选包 +
+直连/镜像/全失败 + **并发竞速 8 条**：慢镜像不拖慢直连、快镜像不等慢直连、全失败不空等超时 + 下载替换与回滚）、
+`tools/update_ui_test.py`（6 节，覆盖按钮与弹窗四种状态、几何不越界、开关写配置、
+**检查过程不弹窗 / updatePrompt 才弹**）。
+两个测试脚本开头都把扫描 worker 换成空操作，避免退出时后台线程还在跑、踩到「ModListModel 已析构」的崩溃；
+`update_check_test` 还会把 `latest_tag_via_mirror` / `assets_via_page` 默认 patch 掉，保证测试不联网。
 
 ### 置顶评论总是显示（不依赖有没有网盘）
 

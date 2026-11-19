@@ -19,9 +19,12 @@
 
 * 直连 `https://api.github.com/repos/{repo}/releases` 拿 release 列表，**必须带 User-Agent**，
   否则 GitHub 直接 403；额度/限流才是 429，所以不能只靠 HTTP 状态码判断成功。
-* 直连失败时（国内常见）遍历镜像前缀，请求 `{mirror}https://github.com/{repo}/releases/latest`，
+* 直连失败时（国内常见）请求 `{mirror}https://github.com/{repo}/releases/latest`，
   **从最终重定向 URL 里解析 `/tag/` 末段**拿 tag。镜像常返回 403 的网页，不能靠状态码判断，
   只能靠最终 URL。
+* **镜像必须并发探测**：8 个镜像串行各超时一次实测最坏要 26 秒（gh-proxy.com、ghproxy.net
+  各 ~9.5 秒读超时），并发后只等最快成功的那条，通常 2~4 秒。直连 API 与镜像探测也并发发起，
+  哪条先拿到可用结果就用哪条。
 * 版本用「数字段逐段比较」，不依赖字符串排序，避免 `v1.0.10` 与 `v1.0.9` 的坑。
 * 下载更新包后，解压（zip）或直接取 exe，写 `.new` → 当前 exe 改名 `.old` → `.new` 改名回
   当前 exe；任何一步失败都回滚，避免把正在运行的 exe 弄坏。
@@ -34,7 +37,9 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
@@ -56,8 +61,11 @@ MIRRORS = (
     "https://hk.gh-proxy.com/",
 )
 
-# 网络超时（秒）
+# 直连 GitHub API 的超时（秒）：能拿到完整更新日志和资产，慢一点也值得等
 TIMEOUT = 10
+# 镜像探测的超时（秒）：镜像只用来「拿最新 tag」，而且是并发探测的，
+# 压短一点，避免个别慢镜像把整体拖住
+PROBE_TIMEOUT = 6
 # 下载更新包的超时（秒），包体大，放宽一些
 DOWNLOAD_TIMEOUT = 120
 
@@ -97,11 +105,77 @@ def _headers() -> dict:
     }
 
 
+# ---- 证书：系统证书库 + certifi 二合一 -----------------------------------
+# ★ 为什么不能直接用 requests 默认的 certifi：
+#   Windows 上 requests 只信 certifi 自带的 CA 列表。国内常见的 GitHub 加速
+#   工具（Steam++ / Watt Toolkit 等）会在本机做 MITM，把自己的根证书装进
+#   **Windows 证书库**——浏览器信、Go 程序（lytvpk 那种）也信，但 certifi 不信，
+#   于是 api.github.com 直接报 SSLCertVerificationError（实测 0.2 秒就失败），
+#   只能退回慢吞吞的镜像。把系统库和 certifi 合并起来两边都信，直连就能用。
+_SSL_CONTEXT_CACHE: list = []
+
+
+def _ssl_context():
+    """返回一个同时信任「系统证书库」和「certifi」的 SSLContext。"""
+    import ssl
+
+    if _SSL_CONTEXT_CACHE:
+        return _SSL_CONTEXT_CACHE[0]
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+
+        # load_verify_locations 是「追加」，不会冲掉上面已加载的系统证书
+        ctx.load_verify_locations(certifi.where())
+    except Exception:  # noqa: BLE001 —— 没有 certifi 就只用系统库
+        pass
+    _SSL_CONTEXT_CACHE.append(ctx)
+    return ctx
+
+
+class _SystemTrustAdapter(requests.adapters.HTTPAdapter):
+    """把 requests 的连接池换成用 `_ssl_context()` 校验的版本。"""
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = _ssl_context()
+        return super().init_poolmanager(*args, **kwargs)
+
+
+_SESSION_CACHE: list = []
+_SESSION_LOCK = threading.Lock()
+
+
+def _session() -> requests.Session:
+    """全局复用一个 Session：省掉每次检查的 TLS 握手，第二次起明显更快。"""
+    if _SESSION_CACHE:
+        return _SESSION_CACHE[0]
+    with _SESSION_LOCK:
+        if not _SESSION_CACHE:
+            s = requests.Session()
+            adapter = _SystemTrustAdapter()
+            s.mount("https://", adapter)
+            s.mount("http://", adapter)
+            _SESSION_CACHE.append(s)
+        return _SESSION_CACHE[0]
+
+
+def _get(url: str, **kwargs) -> requests.Response:
+    """本模块所有 HTTP GET 的统一出口（统一 UA/超时/证书）。
+
+    ★ 测试里要断网，直接替换 `updater._get` 即可。
+    """
+    kwargs.setdefault("headers", _headers())
+    kwargs.setdefault("timeout", TIMEOUT)
+    try:
+        return _session().get(url, **kwargs)
+    except TypeError:
+        # 老版本 urllib3 的 PoolManager 不认 ssl_context，退回 requests 默认行为
+        return requests.get(url, **kwargs)
+
+
 def fetch_releases(repo: str = GITHUB_REPO, timeout: int = TIMEOUT) -> list:
     """直连 GitHub API 拿 release 列表（原始 dict 列表）。"""
-    resp = requests.get(
-        GITHUB_API.format(repo=repo), headers=_headers(), timeout=timeout
-    )
+    resp = _get(GITHUB_API.format(repo=repo), timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
     if not isinstance(data, list):
@@ -109,55 +183,99 @@ def fetch_releases(repo: str = GITHUB_REPO, timeout: int = TIMEOUT) -> list:
     return data
 
 
-def latest_tag_via_mirror(repo: str = GITHUB_REPO, timeout: int = TIMEOUT) -> str:
-    """直连失败时遍历镜像，从 `/releases/latest` 的最终 URL 解析 tag。
+def _first_of(calls: list):
+    """并发执行多个探测，返回**第一个**拿到非空结果的返回值。
 
-    镜像往往返回 403/404 的网页，所以**不判断状态码**，只认最终 URL 里是否含 `/tag/`。
+    `calls` 是 `[(标签, 无参函数), ...]`。串行遍历时每个慢源都要各自
+    超时一次（实测 8 个镜像串行最坏 26 秒），并发后最坏只等最快成功的那个。
+    剩余请求不等待，直接放手返回（工作线程是守护线程，不阻塞退出）。
     """
-    target = GITHUB_LATEST.format(repo=repo)
-    for mirror in MIRRORS:
-        try:
-            resp = requests.get(
-                f"{mirror}{target}",
-                headers={"User-Agent": _USER_AGENT},
-                timeout=timeout,
-                allow_redirects=True,
-            )
-            final_url = resp.url or ""
-        except requests.RequestException:
-            continue
-        if "/tag/" in final_url:
-            tag = final_url.rsplit("/tag/", 1)[1].strip("/").strip()
-            if tag:
-                return tag
+    if not calls:
+        return None
+    executor = ThreadPoolExecutor(max_workers=max(1, len(calls)))
+    try:
+        futures = {executor.submit(fn): label for label, fn in calls}
+        for future in as_completed(futures):
+            try:
+                value = future.result()
+            except Exception:  # noqa: BLE001 —— 单个源异常不能拖垮整次探测
+                continue
+            if value:
+                return value
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    return None
+
+
+def _fetch_latest_tag(url: str, timeout: int) -> str:
+    """请求单个 `/releases/latest`，从最终重定向 URL 解析 tag，失败返回空串。
+
+    镜像常返回 403/404 的网页，所以**不判断状态码**，只认最终 URL 里是否含 `/tag/`。
+    """
+    try:
+        resp = _get(
+            url,
+            headers={"User-Agent": _USER_AGENT},
+            timeout=timeout,
+            allow_redirects=True,
+        )
+    except requests.RequestException:
+        return ""
+    final_url = resp.url or ""
+    if "/tag/" in final_url:
+        tag = final_url.rsplit("/tag/", 1)[1].strip("/").strip()
+        if tag:
+            return tag
     return ""
 
 
+def latest_tag_via_mirror(
+    repo: str = GITHUB_REPO, timeout: int = PROBE_TIMEOUT
+) -> str:
+    """并发探测全部镜像，第一个解析出 tag 的立即返回。
+
+    镜像只用来「拿最新 tag」，拿不到详细日志和资产，需要时再用
+    `assets_via_page` 补。
+    """
+    target = GITHUB_LATEST.format(repo=repo)
+    calls = [
+        (mirror, lambda u=f"{mirror}{target}": _fetch_latest_tag(u, timeout))
+        for mirror in MIRRORS
+    ]
+    return _first_of(calls) or ""
+
+
+def _fetch_assets(url: str, timeout: int) -> list:
+    """抓单个 `expanded_assets` 页面里的资产链接，没有则返回空列表。"""
+    try:
+        resp = _get(url, headers=_headers(), timeout=timeout)
+    except requests.RequestException:
+        return []
+    if resp.status_code != 200:
+        return []
+    found = _ASSET_RE.findall(resp.text)
+    if not found:
+        return []
+    # HTML 里可能是相对链接，统一转成绝对链接
+    return [
+        u if u.startswith("http") else f"https://github.com{u}" for u in found
+    ]
+
+
 def assets_via_page(
-    repo: str, tag: str, timeout: int = TIMEOUT
+    repo: str, tag: str, timeout: int = PROBE_TIMEOUT
 ) -> list:
-    """拿某个 release 的下载资产链接（仅 API 不可用时的兜底）。
+    """并发兜底拿某个 release 的下载资产链接（API 不可用时才走这里）。
 
     用 `releases/expanded_assets/{tag}` 这个 HTML 片段接口，比翻整个 release 页轻量。
     """
     url = f"https://github.com/{repo}/releases/expanded_assets/{tag}"
-    for base in ("", *MIRRORS):
-        try:
-            resp = requests.get(
-                f"{base}{url}", headers=_headers(), timeout=timeout
-            )
-            if resp.status_code != 200:
-                continue
-            found = _ASSET_RE.findall(resp.text)
-            if found:
-                # HTML 里可能是相对链接，统一转成绝对链接
-                return [
-                    u if u.startswith("http") else f"https://github.com{u}"
-                    for u in found
-                ]
-        except requests.RequestException:
-            continue
-    return []
+    calls = [("direct", lambda u=url: _fetch_assets(u, timeout))]
+    calls += [
+        (mirror, lambda m=mirror, u=url: _fetch_assets(f"{m}{u}", timeout))
+        for mirror in MIRRORS
+    ]
+    return _first_of(calls) or []
 
 
 # ================================================================= 选更新包
@@ -196,6 +314,10 @@ def check_update(repo: str = GITHUB_REPO, current: str = "") -> dict:
       ``note``       str   更新内容（多个版本时按版本号从旧到新聚合）
       ``url``        str   更新包下载链接
       ``error``      str   出错信息，成功为空串
+
+    ★ 直连 API 与「镜像取 tag」是**并发**发起的：串行时 API 秒败后要逐个
+    等 8 个镜像各超时一次（实测最坏 26 秒），并发后整体耗时只取决于最快
+    成功的那条路，通常 2~4 秒。
     """
     info: dict[str, Any] = {
         "has_update": False,
@@ -206,34 +328,71 @@ def check_update(repo: str = GITHUB_REPO, current: str = "") -> dict:
         "error": "",
     }
 
-    try:
-        releases = fetch_releases(repo)
-    except Exception as e:  # noqa: BLE001 —— 网络/解析任何异常都要兜底
-        mirror_tag = ""
-        try:
-            mirror_tag = latest_tag_via_mirror(repo)
-        except Exception:  # noqa: BLE001
-            mirror_tag = ""
-        if not mirror_tag:
-            info["error"] = f"检查更新失败（所有源均不可用）：{e}"
-            return info
+    api_box: dict = {}
+    mirror_box: dict = {}
+    state = {"done": 0}
+    lock = threading.Lock()
+    stop = threading.Event()  # 第一条路成功、或两条都跑完 → 立即停止等待
 
-        # 镜像只给了 tag，没有详细更新日志和资产列表
-        cur = parse_version(current)
-        latest_v = parse_version(mirror_tag)
-        info["latest"] = mirror_tag
-        if not cur or latest_v > cur:
-            info["has_update"] = True
-            info["note"] = (
-                f"网络原因无法拉取详细更新日志，已通过镜像确认最新版本为 {mirror_tag}。"
-            )
-            for link in assets_via_page(repo, mirror_tag):
-                if link.lower().endswith((".exe", ".zip")):
-                    info["url"] = link
-                    break
+    def _finish_one() -> None:
+        with lock:
+            state["done"] += 1
+            if state["done"] >= 2:
+                stop.set()
+
+    def _probe_api() -> None:
+        try:
+            rows = fetch_releases(repo)
+            api_box["releases"] = rows
+            if rows:
+                stop.set()
+        except Exception as e:  # noqa: BLE001 —— 网络/解析任何异常都要兜底
+            api_box["error"] = e
+        finally:
+            _finish_one()
+
+    def _probe_mirror() -> None:
+        try:
+            tag = latest_tag_via_mirror(repo)
+        except Exception:  # noqa: BLE001
+            tag = ""
+        mirror_box["tag"] = tag
+        if tag:
+            stop.set()
+        _finish_one()
+
+    for probe in (_probe_api, _probe_mirror):
+        threading.Thread(target=probe, daemon=True).start()
+    stop.wait(timeout=TIMEOUT)
+
+    releases = api_box.get("releases")
+    if releases:
+        return _info_from_releases(releases, current, info)
+
+    mirror_tag = mirror_box.get("tag") or ""
+    if not mirror_tag:
+        err = api_box.get("error")
+        info["error"] = f"检查更新失败（所有源均不可用）：{err or '没有取到版本信息'}"
         return info
 
-    # ---- 直连成功：聚合所有比当前新的版本 ----
+    # ---- 镜像只给了 tag：没有详细更新日志和资产列表，能补多少补多少 ----
+    cur = parse_version(current)
+    latest_v = parse_version(mirror_tag)
+    info["latest"] = mirror_tag
+    if not cur or latest_v > cur:
+        info["has_update"] = True
+        info["note"] = (
+            f"网络原因无法拉取详细更新日志，已通过镜像确认最新版本为 {mirror_tag}。"
+        )
+        for link in assets_via_page(repo, mirror_tag):
+            if link.lower().endswith((".exe", ".zip")):
+                info["url"] = link
+                break
+    return info
+
+
+def _info_from_releases(releases: list, current: str, info: dict) -> dict:
+    """直连成功时：聚合所有比当前新的版本日志，挑出最新版与下载包。"""
     cur_v = parse_version(current)
     newer: list[tuple] = []
     for r in releases:
@@ -277,7 +436,7 @@ def download_and_install(url: str, timeout: int = DOWNLOAD_TIMEOUT) -> str:
 
     try:
         # ---- 下载 ----
-        with requests.get(
+        with _get(
             url, headers={"User-Agent": _USER_AGENT}, timeout=timeout, stream=True
         ) as resp:
             resp.raise_for_status()
