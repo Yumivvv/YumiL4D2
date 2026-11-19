@@ -17,4 +17,4 @@
 
 APP_NAME = "Yumi的L4D2工具箱"
 APP_ID = "L4D2PublicWatcher"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.1"

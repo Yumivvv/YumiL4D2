@@ -84,6 +84,10 @@ def main() -> int:
     eng.warnings.connect(lambda ws: [warns.append(w.toString()) for w in ws])
 
     core = Core(app)
+    # 协议窗是模态的，会盖住整个窗口、把下面的真实鼠标点击全吃掉。
+    # 沙箱里可能是一份全新的 config（agreement_version 为 0），协议窗就会弹出来，
+    # 于是「点三连 → 弹二维码」永远点不到。这里明确标成已同意。
+    core.config["agreement_version"] = int(core.AGREEMENT_VERSION)
     # 假凭据在真机上会被 nav 判定失效并清掉，这里直接短路，避免测到一半变未登录
     core.biliRefreshUser = lambda: {"ok": True}       # type: ignore[assignment]
     eng.rootContext().setContextProperty("core", core)

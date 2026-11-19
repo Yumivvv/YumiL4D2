@@ -31,6 +31,9 @@ eng.addImportPath(os.path.join(q, "components"))
 warns = []
 eng.warnings.connect(lambda ws: [warns.append(w.toString()) for w in ws])
 core = Core(app)
+# 别真的去扫 B 站：把扫描 worker 换成空操作，
+# 避免退出时后台线程还在跑、踩到「ModListModel 已析构」的崩溃。
+core._scan_worker = lambda: (core._set_busy(False), core.statusChanged.emit())
 # 强制「没同意过」。同时记住原值，测试结束还原 ——
 # 否则跑到一半调 acceptAgreement() 会把 config.json 写成「已同意」，
 # 下次再跑这个测试前置状态就不对了（全量跑的顺序依赖）。
@@ -76,14 +79,30 @@ def phase1():
     print(f"  正文 {ch:.0f}px，可视 {h:.0f}px", flush=True)
     check("正文比可视区长（需要滚动）", ch > h + 4, f"{ch:.0f} vs {h:.0f}")
     check("初始不在底部", flick.property("contentY") == 0)
+    # 倒计时必须真的在跑，不只是写了句文案。
+    # 这两个属性在窗口根对象上（弹窗实例的属性名不会传进 contentItem）。
+    left = win.property("agreeLeft")
+    check("倒计时在走（已从 10 往下减）",
+          left is not None and int(left) < 10, str(left))
 
     box = win.findChild(object, "agreementCheck")
     check("找到勾选框", box is not None)
     # ★ 不用 childItems() 去找 MouseArea —— 无头环境下它拿不到子节点。
-    #   改为在源码里断言「勾选框的 enabled 绑到了 atBottom」，
-    #   这正是「未读完不能点」的实现方式。
-    check("勾选框的 enabled 绑到 atBottom（未读完禁用）",
-          "enabled: agreeFlick.atBottom" in main_src)
+    #   改为在源码里断言「勾选框的 enabled 绑到了 agreementReady」，
+    #   agreementReady = 读到最底 or 倒计时跑完，这正是「未读完不能点」的实现方式。
+    check("勾选框的 enabled 绑到 agreementReady（未读完禁用）",
+          "enabled: win.agreementReady" in main_src)
+    # 倒计时：10 秒，划到底也能提前解锁（用户要求）。
+    check("倒计时初值是 10 秒", "property int agreeLeft: 10" in main_src)
+    check("每 1 秒减 1 的 Timer",
+          "interval: 1000" in main_src
+          and "win.agreeLeft = win.agreeLeft - 1" in main_src)
+    check("agreementReady = 到底 or 倒计时结束",
+          "agreeFlick.atBottom || agreeLeft <= 0" in main_src)
+    check("提示文案不再报 px，改成还剩几秒",
+          '还剩 "' in main_src
+          and '+ win.agreeLeft + " 秒）' in main_src
+          and " px）" not in main_src)
 
     btn = win.findChild(object, "agreementAcceptBtn")
     check("找到「开始使用」按钮", btn is not None)
@@ -106,6 +125,12 @@ def phase2(flick, btn):
 def phase3(flick, btn):
     check("滚到底后 atBottom = True", flick.property("atBottom") is True,
           f"contentY={flick.property('contentY')}")
+    dlg = win.findChild(object, "agreementDlg")
+    if dlg is not None:
+        # 用户要求「划到最底下就能勾选」：即使倒计时还没跑完也要解锁。
+        check("划到底后 agreementReady = True（不用等倒计时）",
+              win.property("agreementReady") is True,
+              f"agreeLeft={win.property('agreeLeft')}")
 
     # 勾选
     win.setProperty("agreeChecked", True)

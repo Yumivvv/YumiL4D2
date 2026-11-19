@@ -110,6 +110,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "bili_triple_follow": False,
     # 翻译 MOD 描述用的接口（目前只有免 key 的公开接口）
     "translate_enabled": True,
+    # 软件更新：每次打开软件时自动检查一次 GitHub Releases 上的新版本。
+    # 默认关 —— 检查更新要走网络，不想每次启动都发请求的可以保持关闭，
+    # 需要时到「关于」里手动点「检查更新」。
+    "auto_check_update": False,
     # 播放器音量（0-100）与静音状态，跨会话记住
     "player_volume": 80,
     "player_muted": False,

@@ -65,6 +65,14 @@ Window {
     property bool agreeChecked: false
     property bool agreementDone: false
 
+    // 协议「读够了」的判定：**划到最底下**，或者 **10 秒倒计时跑完**，
+    // 满足任意一条即可勾选（用户要求把原来的「还剩多少 px」改成 10 秒）。
+    // ★ 这两个属性必须放在根对象上：QML 里一个实例自己的属性名
+    //   不会传进它的 contentItem，写在协议弹窗里的话，弹窗正文的
+    //   绑定会直接 ReferenceError。
+    property int agreeLeft: 10
+    readonly property bool agreementReady: agreeFlick.atBottom || agreeLeft <= 0
+
     // ---- B 站扫码登录
     property string biliLoginState: ""      // "" / loading / waiting / scanned / ok / expired
     property string biliQrKey: ""
@@ -2776,7 +2784,8 @@ Window {
                             { label: "新视频系统通知", desc: "右下角弹出 Windows 通知横幅", key: "toast" },
                             { label: "通知提示音", desc: "有新视频时播放提示音（音效可在下面自定义）", key: "sound" },
                             { label: "关闭窗口时最小化到托盘", desc: "关掉窗口后继续在后台检查", key: "tray" },
-                            { label: "剪贴板服务器检测", desc: "复制到服务器地址时，回到窗口就问一句要不要加进收藏", key: "clip" }
+                            { label: "剪贴板服务器检测", desc: "复制到服务器地址时，回到窗口就问一句要不要加进收藏", key: "clip" },
+                            { label: "自动检测更新", desc: "每次打开软件时检查一次 GitHub 上有没有新版本", key: "update" }
                         ]
                         delegate: Row {
                             width: parent.width
@@ -2804,11 +2813,13 @@ Window {
                                 checked: modelData.key === "toast" ? core.notifyToast
                                        : modelData.key === "sound" ? core.notifySound
                                        : modelData.key === "clip" ? core.clipboardServers
+                                       : modelData.key === "update" ? core.autoCheckUpdate
                                        : core.trayOnClose
                                 onToggled: function (v) {
                                     if (modelData.key === "toast") core.setNotifyToast(v);
                                     else if (modelData.key === "sound") core.setNotifySound(v);
                                     else if (modelData.key === "clip") core.setClipboardServers(v);
+                                    else if (modelData.key === "update") core.setAutoCheckUpdate(v);
                                     else core.setTrayOnClose(v);
                                 }
                             }
@@ -4557,6 +4568,21 @@ Window {
                             }
                         }
 
+                        // 检查更新：走 GitHub Releases（网络逻辑见 app/updater.py）。
+                        // 有新版时按钮变强调色，点开弹窗看版本号和更新日志。
+                        ActionButton {
+                            objectName: "checkUpdateBtn"
+                            width: parent.width
+                            height: 32
+                            label: core.updateChecking ? "正在检查…" : "检查更新"
+                            accent: core.updateInfo.has_update
+                            enabledBtn: !core.updateChecking
+                            onClicked: {
+                                updateDlg.open();
+                                core.checkUpdate();
+                            }
+                        }
+
                         Text {
                             width: parent.width
                             text: "本程序按 GPL-3.0 发布，源码在 GitHub 上可以随便看、随便改；"
@@ -4720,6 +4746,7 @@ Window {
                 // 每次打开都从顶部开始、勾选状态重置 ——
                 // 协议改版后老用户也要重新读一遍。
                 agreeFlick.contentY = 0;
+                win.agreeLeft = 10;
                 win.agreeChecked = false;
             }
             padding: 0
@@ -4727,6 +4754,19 @@ Window {
             // 总高度能从 1400 降到 1100 左右，读完更快。
             contentWidth: 640
             contentHeight: agreeCol.implicitHeight
+
+            // 距「可以勾选」的 10 秒倒计时。用户要求把原来那个
+            // 「还剩多少 px」改成 10 秒，并且**划到最底下也能直接勾选**：
+            // 满足任意一条就算读够了。
+            // ★ 这两个属性放在**窗口根对象**上（不是本 Popup 上）——
+            //   QML 里实例的属性名不会传给 contentItem 的子节点，
+            //   写在 Popup 里 contentItem 引用就是 ReferenceError。
+            Timer {
+                id: agreeTimer
+                interval: 1000
+                running: agreementDlg.visible && win.agreeLeft > 0
+                onTriggered: win.agreeLeft = win.agreeLeft - 1
+            }
 
             Overlay.modal: Rectangle { color: Qt.rgba(0, 0, 0, 0.72) }
 
@@ -5198,11 +5238,11 @@ Window {
                     rightPadding: 22
                     spacing: 10
 
-                    // 没读完时给个明确提示，并显示进度
+                    // 还没读够时给个明确提示（滚到底 / 倒计时结束都会自动消失）
                     Row {
                         width: parent.width - 44      // 减掉 Column 的左右 padding
                         spacing: 8
-                        visible: !agreeFlick.atBottom
+                        visible: !win.agreementReady
                         Text {
                             text: "\uE7BA"          // Warning
                             font.family: Theme.iconFont
@@ -5212,11 +5252,8 @@ Window {
                         }
                         Text {
                             width: parent.width - 24
-                            text: "请把上面的内容滚动读到底（还剩 "
-                                  + Math.max(0, Math.round(agreeFlick.contentHeight
-                                                           - agreeFlick.height
-                                                           - agreeFlick.contentY))
-                                  + " px）"
+                            text: "请把上面的内容滚动读到底，或等待倒计时结束（还剩 "
+                                  + win.agreeLeft + " 秒）"
                             color: Theme.warn
                             font.family: Theme.uiFont
                             font.pixelSize: 11
@@ -5236,7 +5273,7 @@ Window {
                         width: parent.width - 44       // 22 + 22
                         height: 40
                         radius: Theme.radiusXS
-                        color: agreeFlick.atBottom
+                        color: win.agreementReady
                                ? (agreeCheckMa.containsMouse ? Theme.scrim(0.09) : Theme.scrim(0.05))
                                : Theme.scrim(0.02)
                         border.width: 1
@@ -5261,10 +5298,10 @@ Window {
                                 anchors.verticalCenter: parent.verticalCenter
                                 color: agreeChecked ? Qt.rgba(Theme.accent.r, Theme.accent.g,
                                                               Theme.accent.b, 0.95)
-                                     : (agreeFlick.atBottom ? Theme.scrim(0.10)
+                                     : (win.agreementReady ? Theme.scrim(0.10)
                                                             : Theme.scrim(0.04))
                                 border.width: agreeChecked ? 0 : 1
-                                border.color: agreeFlick.atBottom ? Theme.borderHi
+                                border.color: win.agreementReady ? Theme.borderHi
                                                                   : Theme.scrim(0.10)
                                 Text {
                                     anchors.centerIn: parent
@@ -5279,7 +5316,7 @@ Window {
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: "我已知悉，并同意遵守以上约定"
-                                color: agreeFlick.atBottom
+                                color: win.agreementReady
                                        ? (agreeChecked ? Theme.accent : Theme.text)
                                        : Theme.textMute
                                 font.family: Theme.uiFont
@@ -5293,8 +5330,8 @@ Window {
                             anchors.fill: parent
                             hoverEnabled: true
                             // 没读到底就点不动（光标也不变手型）
-                            enabled: agreeFlick.atBottom
-                            cursorShape: agreeFlick.atBottom ? Qt.PointingHandCursor
+                            enabled: win.agreementReady
+                            cursorShape: win.agreementReady ? Qt.PointingHandCursor
                                                              : Qt.ForbiddenCursor
                             onClicked: agreeChecked = !agreeChecked
                         }
@@ -5324,6 +5361,175 @@ Window {
                                 core.acceptAgreement();
                                 agreementDlg.close();
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------ 检查更新（GitHub Releases）
+        // 后端：app/updater.py 走 api.github.com 拿 releases，直连不通时用镜像兜底；
+        // 这里只负责显示版本号 / 更新日志，以及触发下载。
+        Popup {
+            id: updateDlg
+            objectName: "updateDlg"
+            visible: false
+            modal: true
+            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+            anchors.centerIn: Overlay.overlay
+            padding: 0
+            contentWidth: 460
+            contentHeight: updateCol.implicitHeight
+
+            Overlay.modal: Rectangle { color: Qt.rgba(0, 0, 0, 0.55) }
+
+            background: Rectangle {
+                radius: 14
+                color: Theme.panel
+                border.width: 1
+                border.color: Theme.borderHi
+            }
+
+            contentItem: Column {
+                id: updateCol
+                width: 460
+                spacing: 0
+
+                Column {
+                    width: parent.width
+                    leftPadding: 22
+                    rightPadding: 22
+                    topPadding: 16
+                    bottomPadding: 12
+                    spacing: 3
+                    Text {
+                        width: parent.width
+                        text: "检查更新"
+                        color: Theme.text
+                        font.family: Theme.uiFont
+                        font.pixelSize: 17
+                        font.weight: Font.Bold
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: "当前版本 " + core.aboutVersion
+                        color: Theme.textMute
+                        font.family: Theme.uiFont
+                        font.pixelSize: 10
+                    }
+                }
+
+                Rectangle { width: parent.width; height: 1; color: Theme.border }
+
+                Column {
+                    width: parent.width
+                    leftPadding: 22
+                    rightPadding: 22
+                    topPadding: 16
+                    bottomPadding: 10
+                    spacing: 10
+
+                    // 状态：检查中 / 有新版 / 已最新 / 出错
+                    Row {
+                        width: parent.width - 44
+                        spacing: 8
+                        Rectangle {
+                            width: 8
+                            height: 8
+                            radius: 4
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: core.updateChecking ? Theme.textMute
+                                 : (core.updateInfo.error ? Theme.warn
+                                 : (core.updateInfo.has_update ? Theme.accent : Theme.ok))
+                        }
+                        Text {
+                            objectName: "updateStatusText"
+                            width: parent.width - 20
+                            wrapMode: Text.WordWrap
+                            color: Theme.text
+                            font.family: Theme.uiFont
+                            font.pixelSize: 12
+                            text: {
+                                if (core.updateChecking)
+                                    return "正在从 GitHub 检查新版本…";
+                                if (core.updateInfo.error)
+                                    return core.updateInfo.error;
+                                if (core.updateInfo.has_update)
+                                    return "发现新版本 " + core.updateInfo.latest;
+                                return "当前已是最新版本";
+                            }
+                        }
+                    }
+
+                    // 更新日志（多个版本时按版本号从旧到新聚合，可滚动）
+                    Flickable {
+                        id: updateNoteFlick
+                        width: parent.width - 44
+                        height: Math.min(220, updateNote.implicitHeight)
+                        visible: core.updateInfo.note.length > 0 && !core.updateInfo.error
+                        contentWidth: updateNoteFlick.width
+                        contentHeight: updateNote.implicitHeight
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        Text {
+                            id: updateNote
+                            objectName: "updateNoteText"
+                            width: updateNoteFlick.width - 8
+                            text: core.updateInfo.note
+                            color: Theme.textDim
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                            wrapMode: Text.WordWrap
+                            lineHeight: 1.45
+                        }
+                    }
+
+                    Text {
+                        width: parent.width - 44
+                        visible: !core.updateChecking && !core.updateInfo.has_update
+                        wrapMode: Text.WordWrap
+                        color: Theme.textMute
+                        font.family: Theme.uiFont
+                        font.pixelSize: 11
+                        text: core.updateInfo.error
+                              ? "检查失败不影响正常使用，稍后可以再试一次。"
+                              : "作者发布新版本后，这里会自动提示。"
+                    }
+                }
+
+                Rectangle { width: parent.width; height: 1; color: Theme.border }
+
+                Row {
+                    width: parent.width
+                    leftPadding: 22
+                    rightPadding: 22
+                    topPadding: 12
+                    bottomPadding: 16
+                    spacing: 8
+
+                    Item { width: 1; height: 1 }
+
+                    ActionButton {
+                        width: 88
+                        height: 34
+                        accent: false
+                        label: "关闭"
+                        onClicked: updateDlg.close()
+                    }
+                    ActionButton {
+                        objectName: "updateDownloadBtn"
+                        width: 132
+                        height: 34
+                        label: core.updateDownloading ? "正在下载…"
+                             : (core.updateInfo.has_update ? "下载并更新" : "重新检查")
+                        enabledBtn: !core.updateDownloading
+                        onClicked: {
+                            if (core.updateInfo.has_update
+                                    && (core.updateInfo.url || "").length > 0)
+                                core.downloadUpdate();
+                            else
+                                core.checkUpdate();
                         }
                     }
                 }

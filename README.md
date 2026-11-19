@@ -2203,10 +2203,34 @@ MOD 直接下到 `addons/`。**单个 MOD 和合集都支持。**
 
 设置页最底下的一张卡片：应用名 + **作者 Yumi** + 版本号，下面是仓库地址
 **`https://github.com/Yumivvv/YumiL4D2`**——整行可以点（直接开浏览器），
-旁边还有「复制链接」和「打开数据目录」两颗按钮，最底一行说明按 GPL-3.0 发布、可以去仓库提 issue。
+旁边还有「复制链接」和「打开数据目录」两颗按钮，卡片底部多一颗
+**「检查更新」**按钮，最底一行说明按 GPL-3.0 发布、可以去仓库提 issue。
 
 > 这几个字都来自 `app/core.py` 里的 `APP_AUTHOR` / `APP_HOMEPAGE` / `APP_VERSION`
 > 和 `core.about*` 属性，QML 只负责排版 —— 以后换仓库地址或改版本号只改一处。
+
+点「检查更新」弹出一个小窗，显示四种状态之一：
+
+| 状态 | 界面表现 |
+| --- | --- |
+| 正在检查 | 状态圆点灰色，按钮显示「正在检查…」，不可重复点 |
+| 发现新版 | 圆点蓝色，写出「发现新版本 X.Y.Z」，下方日志区逐条列出本次改了什么，按钮变「下载并更新」 |
+| 已是最新 | 圆点绿色，写「当前已是最新版本」，按钮变「重新检查」 |
+| 检查失败 | 圆点黄色，直接显示失败原因，日志区隐藏，按钮变「重新检查」 |
+
+> 版本号比对的是 **GitHub Releases**（`https://github.com/Yumivvv/YumiL4D2/releases`）：
+> 先打 GitHub 官方 API 拉 release 列表，拿到最新 tag 和所有**比当前版本新**的 release 说明，
+> 按版本从旧到新聚合成日志；**直连不通时自动退到镜像站**（gh-proxy.com / ghfast.top 等
+> 8 个前缀，只认跳转后的 URL 里有没有 `/tag/`，因为镜像对 API 返回 403 网页，不能靠状态码判断）。
+> 更新包直接下 `.exe` / `.zip`，下完把当前 exe 改名 `.old` 再替换，失败会回滚。
+> 代码在 `app/updater.py`，后端方法 `core.checkUpdate()` / `core.downloadUpdate()`。
+
+> 「下载并更新」是**真下载真替换**，所以只在用户明确点的时候跑；检查本身不下载。
+> 检查更新和下载都放在后台线程，不会卡界面，结果通过 `core.updateInfo` 推给 QML。
+
+**设置页的「自动检测更新」开关**：打开后，每次启动软件会自动检查一次 GitHub 有没有
+新版本，发现新版就右下角弹一条「发现新版本…，可在「关于」里查看更新」，不自动下载。
+默认是关的 —— 觉得每次启动都要等一下的人可以保持关闭，只在想看的时候手动点「检查更新」。
 
 # 三、缓存与空间
 
@@ -2687,8 +2711,12 @@ protocol、map/folder/game/appid/人数/版本、Valve 彩色控制字符、方�
 
 ### 用户协议（首次启动强制阅读）
 
-首次启动弹不可跳过的协议窗，**必须把正文滚动读到底**才能勾选「我已知悉」，
-勾选后才能点「开始使用」。没有 Esc、没有点外面关闭 —— 只能同意或退出。
+首次启动弹不可跳过的协议窗，**把正文滚动读到底、或等 10 秒倒计时走完**，
+才能勾选「我已知悉」；勾选后才能点「开始使用」。没有 Esc、没有点外面关闭 —— 只能同意或退出。
+
+倒计时是 10 秒：刚弹窗时不勾选，勾选框灰着、底部提示「请把上面的内容滚动读到底，或等待倒计时结束（还剩 N 秒）」，
+每过一秒 N 减一；**读到底可以立刻勾，不用等倒计时**，倒计时归零也自动解锁。
+弹窗关掉再打开，倒计时重置回 10。
 
 正文按**六节条款式**写（对应正式的协议草案），不是一段散文：
 
@@ -2709,7 +2737,12 @@ protocol、map/folder/game/appid/人数/版本、Valve 彩色控制字符、方�
 - 版本号存 `config.json` 的 `agreement_version`。
   **改协议正文就把 `Core.AGREEMENT_VERSION` +1**，老用户下次启动重新看到，不用写迁移。
 - 「读到底」判定：`contentY + height >= contentHeight - 24`（24px 容差，内容不足一屏也算读完）。
-- 未读完：勾选框 `enabled: false` + 斜杠光标 + 底部「还剩 N px」黄色提示。
+- 解锁条件 = **读到底 或 倒计时归零**：根对象上有 `readonly property bool agreementReady: agreeFlick.atBottom || agreeLeft <= 0`，
+  勾选框 `enabled: win.agreementReady`，`Timer` 每 1000ms 把 `agreeLeft` 减 1，弹窗关闭时重置回 10。
+- 未读完：勾选框不可点 + 斜杠光标 + 底部「还剩 N 秒」黄色提示。
+- **QML 属性作用域坑**：`agreeLeft` / `agreementReady` 必须声明在**窗口根对象**上，
+  不能写在 `agreementDlg` 里面 —— QML 里实例自己的属性名**传不进它的 `contentItem` 子节点**，
+  写在弹窗里 QML 直接 `ReferenceError: agreementReady is not defined`；弹窗内引用要加 `win.` 前缀。
 - 弹窗 640 宽、可视区 460 高，正文约 1100px，滚两下能读完。
 
 > **两个布局坑**（都已修）：
@@ -2718,7 +2751,28 @@ protocol、map/folder/game/appid/人数/版本、Valve 彩色控制字符、方�
 > ② 底部勾选框/按钮行写 `width: parent.width`，但父 Column 有 22px 左右 padding，
 >    子项拿到的仍是整宽，整块往右溢出 22px 冲出弹窗 —— 改用 `parent.width - 44`。
 
-回归测试 `tools/agreement_test.py`（26 项断言，测试结束还原配置，可重复运行）。
+回归测试 `tools/agreement_test.py`（32 项断言，覆盖倒计时递减、`agreementReady` 的「到底 / 归零」两个解锁条件、
+提示文案已从「还剩 N px」改成「还剩 N 秒」，测试结束还原配置，可重复运行）。
+
+### 软件更新（检查更新 / 自动检测）
+
+后端 `app/updater.py`，方法全部挂在 `Core` 上（`checkUpdate()` / `downloadUpdate()` / `autoCheckUpdate` 属性与
+`setAutoCheckUpdate()`），QML 只通过 `core.updateInfo`（6 键：`has_update / current / latest / note / url / error`）、
+`core.updateChecking`、`core.updateDownloading` 三个属性读结果，`updateChanged` 信号触发刷新。
+
+- **版本解析**取字符串里**第一段 `x.y.z`**，不足补 0，所以 `工具箱_1.0.10` 能正确解析（注意不能用「把所有数字抓出来」的写法，
+  会被标题里的 `L4D2` 的 4、2 搅乱）。
+- **更新日志**：聚合所有**比当前版本新**的 release，每条格式 `【tag】\n正文`，按版本从旧到新排。
+- **镜像兜底**：GitHub API 直连不通时，遍历 8 个镜像前缀访问 `…/releases/latest`，只认**跳转后的 URL 里有没有 `/tag/`**
+  （镜像对 API 返回的是 403 网页，不能靠 HTTP 状态码判断）。拿到 tag 后再抓 `releases/expanded_assets/{tag}` 解析出下载链接。
+- **选包**：优先 `.exe`，其次 `.zip`；空列表要判空，别直接取 `[0]`。
+- **安装**：下载到临时目录 → 校验前 2 字节是 `PK`（是 zip 就解开找 `.exe`，裸 exe 直接用）→ 当前 exe 改名 `.old` →
+  新文件 `os.replace` 回去，任何一步失败都回滚 `.old`。
+- **自动检测**：`config["auto_check_update"]`，启动 2 秒后在后台线程检查一次；发现新版只弹 toast 提示，**不自动下载**。
+
+回归测试：`tools/update_check_test.py`（纯逻辑 30 条断言，覆盖版本解析 / 选包 / 直连成功 / 镜像兜底 / 全失败 / 下载替换与回滚）、
+`tools/update_ui_test.py`（5 节，覆盖按钮与弹窗的四种状态、几何不越界、开关写配置）。
+两个测试脚本开头都把扫描 worker 换成空操作，避免退出时后台线程还在跑、踩到「ModListModel 已析构」的崩溃。
 
 ### 置顶评论总是显示（不依赖有没有网盘）
 
@@ -2821,6 +2875,11 @@ protocol、map/folder/game/appid/人数/版本、Valve 彩色控制字符、方�
 - `tools/detail_actions_test.py`：真开 QML 量几何 —— 五颗按钮等宽且间距 8px、
   三连紧挨分享右边、**用真实鼠标点击**验证未登录点三连会弹二维码
   （不是 `invokeMethod`，那样绕过 MouseArea，验不出按钮被禁用）
+- `tools/update_check_test.py`：更新逻辑纯单测 —— 版本解析、选包规则、
+  直连成功 / 镜像兜底 / 全失败、下载替换与回滚
+- `tools/update_ui_test.py`：检查更新弹窗的四种状态、几何不越界、自动检测开关写配置
+- `tools/agreement_test.py`：协议弹窗 —— 10 秒倒计时递减、划到底即解锁、
+  文案从「还剩 N px」改成「还剩 N 秒」、勾选后才能让开始按钮可用
 
 **详情面板的操作按钮：三连为什么紧跟分享**
 

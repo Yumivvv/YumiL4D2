@@ -61,6 +61,7 @@ from .sound import (
     resolve_sound_path,
 )
 from .store import DEFAULT_CONFIG, Config, Library
+from .updater import GITHUB_REPO, check_update, download_and_install
 from .util import (
     BG_DIR,
     SOUNDS_DIR,
@@ -268,6 +269,8 @@ class Core(QObject):
     # 后台线程刷新「列表里的某一行」必须回到主线程再做 —— QAbstractListModel
     # 的 dataChanged 只有在 GUI 线程发出，QQuickListView 才会真的重绘那一行。
     _oneSig = Signal(str)
+    # 软件更新：检查中 / 下载中 / 结果（updateInfo）变化时发，QML 据此刷新「关于」里的检查更新弹窗
+    updateChanged = Signal()
 
     def __init__(self, app: QGuiApplication, parent=None):
         super().__init__(parent)
@@ -317,6 +320,20 @@ class Core(QObject):
         self._cover_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         self._lock = threading.Lock()
 
+        # 软件更新状态：updateInfo 供「关于」里的检查更新弹窗读；
+        # _auto_check_requested 用来区分「启动自动检查」和用户手动点检查
+        self._update_info: dict[str, Any] = {
+            "has_update": False,
+            "current": "",
+            "latest": "",
+            "note": "",
+            "url": "",
+            "error": "",
+        }
+        self._update_checking = False
+        self._update_downloading = False
+        self._auto_check_requested = False
+
         self._timer = QTimer(self)
         self._timer.setInterval(int(self.config["interval_min"]) * 60 * 1000)
         self._timer.timeout.connect(self.scan_now)
@@ -333,6 +350,8 @@ class Core(QObject):
         # 启动时总是自动扫一次（不再只对首次启动扫描）——
         # 这样打开软件立刻开始拉最新视频，不用等刷新周期。
         QTimer.singleShot(600, self.scan_now)
+        # 开了「自动检测更新」的，启动后晚一点静默检查一次（避开刚启动的那次扫描）
+        QTimer.singleShot(2000, self._auto_check_once)
         # 有历史数据且开了监控的，扫完这次后继续按周期监控
         if not self.library.first_run() and int(self.config["interval_min"]) > 0:
             self.start_monitor(quiet=True)
@@ -2203,6 +2222,113 @@ class Core(QObject):
         self.statusChanged.emit()
         self.monitorChanged.emit()
         return {"interval": minutes, "monitoring": self._timer.isActive()}
+
+    # ================================================================= 软件更新
+    @Property("QVariantMap", notify=updateChanged)
+    def updateInfo(self) -> dict:
+        """「关于」里的检查更新弹窗要读的全部信息。"""
+        return self._update_info
+
+    @Property(bool, notify=updateChanged)
+    def updateChecking(self) -> bool:
+        return self._update_checking
+
+    @Property(bool, notify=updateChanged)
+    def updateDownloading(self) -> bool:
+        return self._update_downloading
+
+    @Property(bool, notify=statusChanged)
+    def autoCheckUpdate(self) -> bool:
+        """设置页的「自动检测更新」开关：每次打开软件时检查一遍。"""
+        return bool(self.config["auto_check_update"])
+
+    @Slot(bool)
+    def setAutoCheckUpdate(self, value: bool) -> None:
+        self.config["auto_check_update"] = bool(value)
+        self.config.save()
+        self.statusChanged.emit()
+
+    def _auto_check_once(self) -> None:
+        """启动时按设置静默检查一次（不弹检查弹窗，只在有新版时提示一句）。"""
+        if not bool(self.config["auto_check_update"]):
+            return
+        self._auto_check_requested = True
+        self.checkUpdate()
+
+    @Slot()
+    def checkUpdate(self) -> None:
+        """检查 GitHub Releases 上的新版本（后台线程，结果经 updateChanged 回主线程）。"""
+        if self._update_checking:
+            return
+        self._update_checking = True
+        self.updateChanged.emit()
+        threading.Thread(target=self._check_update_worker, daemon=True).start()
+
+    def _check_update_worker(self) -> None:
+        from . import APP_VERSION
+
+        try:
+            info = check_update(GITHUB_REPO, APP_VERSION)
+        except Exception as e:  # noqa: BLE001 —— 任何异常都要变成 error 字段，不能让线程静默死掉
+            info = {
+                "has_update": False,
+                "current": APP_VERSION,
+                "latest": "",
+                "note": "",
+                "url": "",
+                "error": f"检查更新失败：{e}",
+            }
+        info["current"] = APP_VERSION
+        self._update_info = info
+        self._update_checking = False
+        self.updateChanged.emit()
+        if (
+            self._auto_check_requested
+            and not info.get("error")
+            and info.get("has_update")
+        ):
+            self.toast(
+                f"发现新版本 {info.get('latest')}，可在「关于」里查看更新", "info"
+            )
+
+    @Slot()
+    def downloadUpdate(self) -> None:
+        """下载并安装更新包（后台线程，装好后自动重启软件）。"""
+        url = (self._update_info or {}).get("url") or ""
+        if not url:
+            self.toast("没有找到可用的更新包链接", "warn")
+            return
+        if self._update_downloading:
+            return
+        self._update_downloading = True
+        self.updateChanged.emit()
+        threading.Thread(
+            target=self._download_worker, args=(url,), daemon=True
+        ).start()
+
+    def _download_worker(self, url: str) -> None:
+        try:
+            download_and_install(url)
+            self._set_status("更新包已安装，重启后生效")
+            self.toast("更新完成，软件即将重启…", "ok")
+            QTimer.singleShot(1500, self._relaunch_after_update)
+        except Exception as e:  # noqa: BLE001
+            self._set_status(f"更新失败：{e}")
+            self.toast(f"更新失败：{e}", "error")
+        self._update_downloading = False
+        self.updateChanged.emit()
+
+    def _relaunch_after_update(self) -> None:
+        """替换完 exe 后用新程序重新拉起，再退出当前进程。"""
+        try:
+            import sys
+
+            from PySide6.QtCore import QProcess
+
+            QProcess.startDetached(sys.executable)
+        except Exception as e:  # noqa: BLE001
+            log(f"relaunch failed: {e!r}")
+        self.quit_app()
 
     # ================================================================= 工具
     def _set_busy(self, value: bool) -> None:

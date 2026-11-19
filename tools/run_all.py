@@ -40,6 +40,7 @@ GUARDED = [
 DEFAULT_SUITE = [
     "readme_check",
     "core_test",
+    "update_check_test",
     "apply_test",
     "mods_test",
     "sort_test",
@@ -71,6 +72,8 @@ DEFAULT_SUITE = [
     "detail_check",
     "video_detail_test",
     "detail_actions_test",
+    "update_ui_test",
+    "agreement_test",
     "onefile_paths_test",
     "servers_test",
     "downloads_test",
