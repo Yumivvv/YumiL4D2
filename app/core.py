@@ -1356,11 +1356,25 @@ class Core(QObject):
             if r.get("ok"):
                 done.append("投币")
             else:
-                # -104 = 已经投过了，这不算错误
-                if r.get("code") == -104:
-                    done.append("投币（之前投过）")
+                code = r.get("code")
+                # -104 = 硬币不足。★ 以前把它当成「之前投过」算成功，
+                #   这是错的：B 站投币接口里 -104 的官方含义是**硬币不足**
+                #   （「已经投过」是 34005「超过投币上限」）。
+                #   把失败当成功显示「已投币」，用户会以为投上了，实际没投。
+                if code == 34005:
+                    # 真的已经投满了（每人每视频最多 2 枚）—— 这个不算失败
+                    done.append("投币（已经投满 2 枚）")
+                elif code == 34002:
+                    # 自己的稿子，投不了币。这也不是错误，只是做不了
+                    skipped.append("投币（自己的稿件，投不了）")
                 else:
-                    errors.append(f"投币失败：{r.get('message') or r.get('code')}")
+                    # ★ 失败的可能是「硬币不足」「等级不够」「数量非法」……
+                    #   不能一律写「等级低」：等级和硬币余额是两条独立门槛，
+                    #   只提等级会让人跑去升等级，其实账号里一枚币都没有。
+                    #   coin_video 已经把这几类码都翻成人话了，直接用。
+                    errors.append(
+                        r.get("human")
+                        or f"投币失败：{r.get('message') or code}")
         else:
             skipped.append("投币")
 

@@ -49,6 +49,69 @@ check("三连返回失败", res.get("ok") is False, str(res))
 check("提示「还没登录」", "登录" in (res.get("error") or ""), res.get("error"))
 
 print()
+print("=== 2b. 投币失败要说清楚是哪一种（不能只怪等级低）===")
+# 用户报：投币失败只提示「等级低」，但实际上「没有硬币」也会失败。
+# B 站这两条是**独立门槛**（等级 ≥ 2 且硬币 ≥ 1），得分开说。
+COINS = {
+    -104: ("硬币不足", "硬币"),
+    34002: ("不能给自己投币", "自己"),
+    34003: ("投币数量", "数量"),
+    34005: ("投满", "2 枚"),
+    -101: ("未登录", "登录"),
+    -111: ("安全校验", "登录"),
+}
+for code, (need_word, second) in COINS.items():
+    txt = core.client.coin_error_text(code)
+    check("码 %s 有专门的文案" % code, bool(txt), txt)
+    check("码 %s 的文案提到「%s」" % (code, need_word), need_word in txt, txt)
+    check("码 %s 的文案也提到「%s」" % (code, second), second in txt, txt)
+
+check("没见过的码不硬凑文案", core.client.coin_error_text(-9999) == "",
+      core.client.coin_error_text(-9999))
+# ★ 关键：-104 的文案不能只提「等级」，也不能只提「硬币」。
+#   B 站对「没币」和「等级不够」两种情况常常都返回 -104，两条都得写上，
+#   否则用户会被引到错的方向（明明币够却跑去攒币 / 明明没币却等升级）。
+t104 = core.client.coin_error_text(-104)
+check("-104 的文案提到了硬币", "硬币" in t104, t104)
+check("-104 的文案也提到了等级", "等级" in t104, t104)
+check("-104 的文案说明了两者是「或」的关系",
+      "硬币" in t104 and "或者" in t104, t104)
+check("-104 的文案给了等级门槛（2 级）", "2 级" in t104, t104)
+
+# 没见过的码也要带上「两种常见原因」的兜底说明
+fb = core.client.coin_error_text_with_fallback(-9999, "服务开小差")
+check("未知码的兜底文案带原始信息", "服务开小差" in fb, fb)
+check("未知码的兜底文案也提到硬币和等级",
+      "硬币" in fb and "等级" in fb, fb)
+
+# coin_video 要把 human 带上（上层直接显示）
+_orig_post = core.client._post_auth
+core.client._post_auth = lambda url, payload: {
+    "ok": False, "code": -104, "message": "硬币不足"}
+try:
+    coin = core.client.coin_video(12345, 1)
+finally:
+    core.client._post_auth = _orig_post
+check("coin_video 失败时带上 human", bool(coin.get("human")), coin)
+check("human 是「硬币不足」而不是原始码",
+      "硬币" in (coin.get("human") or "") and "-104" not in (coin.get("human") or ""),
+      coin.get("human"))
+
+# core.biliTriple 里 -104 不能再被当成「之前投过」算成功
+core_src = open(os.path.join(ROOT, "app", "core.py"), encoding="utf-8").read()
+triple_block = core_src[core_src.index("def biliTriple"):]
+triple_block = triple_block[:triple_block.index("def biliFavorites")]
+# 只剔掉注释和字符串，避免把说明文字里的 `code == -104` 当成真代码
+code_lines = [ln.split("#", 1)[0].strip() for ln in triple_block.splitlines()]
+code_only = "\n".join(code_lines)
+check("不再把 -104 当成「之前投过」算成功",
+      "code == -104" not in code_only, "还有 -104 的特判")
+check("34005（投满）才算「已经投过」", "code == 34005" in code_only)
+check("34002（自己的稿）走 skipped 而不是报错",
+      "code == 34002" in code_only and "skipped.append" in code_only)
+check("失败时优先用 human 文案", 'r.get("human")' in code_only)
+
+print()
 print("=== 3. 三连开关：默认点赞/投币/收藏开、关注关 ===")
 # ★ 先把四个开关重置成出厂默认再断言。
 #   这些值会落盘到 config.json，别的测试或用户手动改过之后，

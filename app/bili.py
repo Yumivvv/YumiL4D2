@@ -150,6 +150,57 @@ class BiliClient:
     # nav 接口用来查「现在到底登录没 / 登录的是谁」
     NAV_API_LOGIN = "https://api.bilibili.com/x/web-interface/nav"
 
+    # 投币失败的错误码 → 人话。
+    #
+    # ★ 投币失败**不止一个原因**，用户报的现象是「失败只提示等级低」。
+    #   B 站投币有两条**互相独立**的门槛：
+    #     · 账号里有硬币（余额 ≥ 1）
+    #     · 账号等级 ≥ 2（Lv0 / Lv1 不能投币）
+    #   两条任意一条不满足都会失败，而且 B 站对这两种情况**常常都返回 -104
+    #   「硬币不足」**——所以 -104 的文案必须把「没币」和「等级不够」都写上，
+    #   只写一个会把人引到错的方向（明明币是够的，却跑去攒币）。
+    #
+    # 来源：bilibili-API-collect 的 action/like_coin_fav.md。
+    COIN_ERRORS = {
+        -104: ("硬币不足或账号等级不够",
+               "账号里没硬币了（去 B 站 App 签到 / 做任务攒几枚），"
+               "或者等级还没到 2 级（Lv0 / Lv1 不能投币）"),
+        34002: ("不能给自己投币", "这是你自己投的稿，没法投币"),
+        34003: ("投币数量不合法", "只能投 1 枚或 2 枚"),
+        34005: ("这个视频已经投满 2 枚了", "每人每个视频最多 2 枚硬币"),
+        -101: ("账号未登录", "登录已失效，请重新扫码登录"),
+        -111: ("安全校验失败", "没了 bili_jct，重新扫码登录一次就好"),
+    }
+
+    # 没见过的码时的兜底说明：仍然把两个最常见的原因都摆出来，
+    # 而不是含糊地甩一句「投币失败：-xxx」。
+    COIN_GENERIC_HINT = "（常见原因：账号里没硬币了，或者等级还没到 2 级）"
+
+    def coin_error_text(self, code: int, raw: str = "") -> str:
+        """把投币错误码翻成用户能看懂、并且**能照着解决**的一句话。
+
+        返回空字符串表示「这个码没有专门文案，用原始信息兜底」。
+        """
+        try:
+            c = int(code)
+        except (TypeError, ValueError):
+            return ""
+        head = self.COIN_ERRORS.get(c)
+        if not head:
+            return ""
+        title, advice = head
+        return f"投币失败：{title}（{advice}）" if advice else f"投币失败：{title}"
+
+    def coin_error_text_with_fallback(self, code: int, raw: str = "") -> str:
+        """同上，但遇到没收录的码时给一句带「两种常见原因」的兜底文案。"""
+        txt = self.coin_error_text(code, raw)
+        if txt:
+            return txt
+        detail = str(raw or "").strip()
+        base = f"投币失败：{detail}（错误码 {code}）" if detail \
+            else f"投币失败（错误码 {code}）"
+        return base + self.COIN_GENERIC_HINT
+
     def set_credentials(self, sessdata: str, bili_jct: str, dede_userid: str) -> None:
         """把登录态装进当前 session（启动时从配置恢复也走这里）。"""
         self._auth = {
@@ -309,12 +360,23 @@ class BiliClient:
         )
 
     def coin_video(self, aid: int, count: int = 1) -> dict:
-        """投币（count 1 或 2）。"""
+        """投币（count 1 或 2）。
+
+        返回里除了原始的 code / message，还多带一个 `human`：
+        投币失败的错误码被翻成人话（硬币不足 / 等级不够 / 给自己投 /
+        已经投满 …… 见 `COIN_ERRORS`），上层直接显示它就行。
+        """
         n = 2 if int(count or 1) >= 2 else 1
-        return self._post_auth(
+        res = self._post_auth(
             self.COIN_API,
             {"aid": int(aid or 0), "multiply": n, "select_like": 0},
         )
+        if not res.get("ok"):
+            human = self.coin_error_text_with_fallback(
+                res.get("code"), res.get("message") or "")
+            if human:
+                res["human"] = human
+        return res
 
     def favorites(self) -> list:
         """当前账号的收藏夹列表（投币收藏要用它的 id）。"""

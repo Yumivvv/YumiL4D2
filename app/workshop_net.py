@@ -108,10 +108,25 @@ CDN_POOL_URL = "https://lytvpk-get-ips.laoyutang.cn/"
 _PROBE_PATH = "/ugc/11950912305938203132/6B59A7A5421AAECA12356E625388AEE4DB569E04/"
 
 # 翻译
-TRANSLATE_HOST = "translate.yandex.net"
-TRANSLATE_PATH = "/api/v1/tr.json/translate"
-# Yandex 的移动端 UA；用它才能免 key 调公开接口
-TRANSLATE_UA = "ru.yandex.translate/3.20.2024"
+#
+# ★ Yandex 的公开接口已经**彻底停用**，2026 年实测：
+#     srv=android  → HTTP 403 {"code":405,"message":"Session is invalid"}
+#     去掉 srv     → HTTP 410 "Yandex.Translate API v1 is no longer active.
+#                    Please migrate to API v1.5"
+#   而 v1.5 要 API key + 计费，不是「免注册」能用起来的东西。
+#   所以兜底接口换成腾讯交互翻译（transmart）：免 key、国内直连快、
+#   自动识别语种（中英日韩都实测可用），单块上限 6000 字符。
+TRANSLATE_HOST = "transmart.qq.com"
+TRANSLATE_PATH = "/api/imt"
+# 腾讯前端自己用的固定 client_key 形状（chrome + 版本 + 系统 + 32 个 0 占位）
+TRANSLATE_CLIENT_KEY = ("browser-chrome-120.0.0-Windows_10-x64-"
+                        + "0" * 32)
+
+# MyMemory 的 q 参数上限（**字符**，不是字节）。超了它返回
+# HTTP 200 + responseStatus 403 + "QUERY LENGTH LIMIT EXCEEDED"。
+MYMEMORY_MAX_CHARS = 500
+# 腾讯交互翻译单块上限（实测超过会返回 "Too many characters (over 6000)"）
+TRANSMART_MAX_CHARS = 5800
 
 # 认为「已经是中文」时直接跳过翻译
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -556,20 +571,14 @@ def looks_chinese(text: str) -> bool:
     return hits >= 5 or (hits / non_space) >= 0.15
 
 
-def _yandex_ucid() -> str:
-    """Yandex 移动端接口要一个 ucid（随便一个 8 位十六进制串就行）。"""
-    import random
-
-    return "%08x" % random.getrandbits(32)
-
-
 def translate(text: str, target: str = "zh", timeout: float = 15.0) -> dict:
     """把文本翻成中文。
 
     依次尝试多个**免注册、免 API key** 的公开接口，第一个成功的就返回：
 
-      1. MyMemory（实测最稳，国内能连，免费额度够看 MOD 描述）
-      2. Yandex 公开接口（有时 403，作备份）
+      1. MyMemory（国内能连，中文质量够看 MOD 描述；但单次上限 500 字符、
+         有每日额度，超了会「HTTP 200 + responseStatus 403」而不是 4xx）
+      2. 腾讯交互翻译 transmart（免 key、自动识别语种、单块 6000 字符，实测稳）
 
     返回 {"ok", "text", "provider", "error"}。
     已经是中文的直接返回原文并标注 skipped。
@@ -580,15 +589,22 @@ def translate(text: str, target: str = "zh", timeout: float = 15.0) -> dict:
     if looks_chinese(src):
         return {"ok": True, "text": src, "provider": "none", "skipped": True, "error": ""}
 
-    # 公开接口对单次长度有限制，分段翻（按行/句切，尽量不切断句子）
-    chunks = _split_chunks(src, 450)
+    # 公开接口对单次长度有限制，分段翻（按行/句切，尽量不切断句子）。
+    # ★ 上限取 480 而不是 MyMemory 的 500：留 20 字符余量。
+    #   以前写的是 450 —— 数字看着安全，但那是**字符**数，而且真正的坑不在
+    #   分段本身（见 `_translate_chunk_mymemory` 里那段 403 说明）。
+    chunks = _split_chunks(src, 480)
     errors: list[str] = []
     # 整段一起猜一次当兜底提示：某些分段只有汉字（比如日文里的汉字词），
     # 单看那一段会猜成中文，用整段的结论纠正。
     hint = detect_lang(src)
 
+    # 顺序：MyMemory 先（国内连得上、中文质量还行），腾讯兜底
+    # （免 key、自动识别语种、单块 6000 字符，实测很稳）。
+    # ★ 以前的兜底是 Yandex，那个公开接口已经停用（403 / 410），
+    #   留着它只会让每个失败都多一条「HTTP 403」的噪音错误。
     for name, fn in (("mymemory", _translate_chunk_mymemory),
-                     ("yandex", _translate_chunk_yandex)):
+                     ("transmart", _translate_chunk_transmart)):
         out: list[str] = []
         ok = True
         for chunk in chunks:
@@ -633,10 +649,31 @@ def _translate_chunk_mymemory(chunk: str, target: str, timeout: float,
     源语言以前写死成 en，日语/韩语简介发过去等于「让英语翻译器翻日文」，
     返回的常常是原文或者一句英文报错，表现就是「点了翻译没反应」。
     现在先按字符集猜语向，猜错（返回原文 / 报语言对无效）再依次退。
+
+    ★ **「翻译 HTTP 403」的根因就在这个函数里**，分两层：
+
+      1. MyMemory 的 q 参数**最多 500 个字符**。超了它不返回 4xx，
+         而是 **HTTP 200 + body 里 `responseStatus: 403` +
+         "QUERY LENGTH LIMIT EXCEEDED"**。以前只判 `resp.status != 200`，
+         于是这种「200 但内容是报错」被当成成功继续往下走，最后把那句
+         QUERY LENGTH LIMIT 当译文显示，或者把它当「语向不对」反复重试。
+      2. 以前 `_split_chunks` 按 450 切 —— 但那是**字符**，MyMemory 数的是
+         **字符**没错，450 本来是安全的；真正的坑是调用方传进来的整段
+         偶尔会超（拼接、翻译整段详情时），以及额度耗尽时它返回 429 +
+         "MYMEMORY WARNING"，那种也会被当成译文。
+
+    所以这里两道闸都补上：先按 500 字符硬校验，再逐个检查 body 里的
+    responseStatus / quotaFinished，最后才相信 translatedText。
     """
     lang = _TARGET_CODES.get((target or "zh").strip().lower(), target or "zh-CN")
     err = "翻译结果为空"
     for src in _source_candidates(chunk, hint):
+        # ★ 硬校验：超过 500 字符的请求必然被 MyMemory 拒（403），
+        #   直接判失败交给下一个 provider，别浪费一次网络往返。
+        if len(chunk) > MYMEMORY_MAX_CHARS:
+            return {"ok": False, "text": "",
+                    "error": f"这段太长（{len(chunk)} 字符 > "
+                             f"{MYMEMORY_MAX_CHARS}），换一家的接口"}
         q = urllib.parse.urlencode({"q": chunk, "langpair": src + "|" + lang})
         req = urllib.request.Request(
             "https://api.mymemory.translated.net/get?" + q,
@@ -650,7 +687,11 @@ def _translate_chunk_mymemory(chunk: str, target: str, timeout: float,
                     continue
                 body = resp.read()
         except urllib.error.HTTPError as e:
-            err = f"HTTP {e.code}"
+            # 429 = 额度用完（它 body 里还会写 MYMEMORY WARNING）
+            if e.code == 429:
+                err = "免费额度用完了，稍后再试"
+            else:
+                err = f"HTTP {e.code}"
             continue
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             err = f"连不上（{type(e).__name__}）"
@@ -660,16 +701,43 @@ def _translate_chunk_mymemory(chunk: str, target: str, timeout: float,
         except ValueError:
             err = "返回的不是 JSON"
             continue
+
+        # ★★ 关键：HTTP 200 不代表成功。
+        #   超长 → responseStatus 403 + "QUERY LENGTH LIMIT EXCEEDED"
+        #   额度 → responseStatus 429 + "MYMEMORY WARNING"
+        #   以前只看 resp.status，这两种都会被当成正常译文往下走。
+        rs = j.get("responseStatus")
+        try:
+            rs_int = int(rs)
+        except (TypeError, ValueError):
+            rs_int = 0
+        if j.get("quotaFinished") or rs_int == 429:
+            err = "免费额度用完了，稍后再试"
+            continue
+        detail = str(j.get("responseDetails") or "")
+        if rs_int and rs_int != 200:
+            if "QUERY LENGTH LIMIT" in detail.upper():
+                err = (f"这段太长（{len(chunk)} 字符，接口上限 "
+                       f"{MYMEMORY_MAX_CHARS}）")
+            else:
+                err = f"翻译服务返回 {rs_int}：{detail[:60] or '未知错误'}"
+            continue
+
         data = j.get("responseData") or {}
         got = str(data.get("translatedText") or "").strip()
         if not got:
             err = "翻译结果为空"
             continue
-        # MyMemory 额度用尽时会返回一段英文提示，别把它当译文
-        if "MYMEMORY WARNING" in got.upper():
-            return {"ok": False, "text": "", "error": "免费额度用完了，稍后再试"}
+        # 兜底：有些老版本只在 translatedText 里塞提示，responseStatus 还是 200
+        up = got.upper()
+        if "MYMEMORY WARNING" in up:
+            err = "免费额度用完了，稍后再试"
+            continue
+        if "QUERY LENGTH LIMIT" in up or "MAX ALLOWED" in up:
+            err = f"这段太长（{len(chunk)} 字符，接口上限 {MYMEMORY_MAX_CHARS}）"
+            continue
         # 语向填错时接口会把原文吐回来（还会带一句 PLEASE SELECT TWO DISTINCT LANGUAGES）
-        if got.lower() in (chunk.strip().lower(),) or "DISTINCT LANGUAGES" in got.upper():
+        if got.lower() in (chunk.strip().lower(),) or "DISTINCT LANGUAGES" in up:
             err = f"语向 {src}|{lang} 不被接受"
             continue
         # 日语/韩语没被翻掉（按 en 发过去时就这样）：换个语向再来一次
@@ -680,27 +748,51 @@ def _translate_chunk_mymemory(chunk: str, target: str, timeout: float,
     return {"ok": False, "text": "", "error": err}
 
 
-def _translate_chunk_yandex(chunk: str, target: str, timeout: float,
-                            hint: str = "") -> dict:
-    """调 Yandex 的公开翻译接口（免 API key，有时 403，作备份）。"""
-    params = urllib.parse.urlencode({
-        "ucid": _yandex_ucid(),
-        "srv": "android",
-        "format": "text",
-    })
-    url = "https://" + TRANSLATE_HOST + TRANSLATE_PATH + "?" + params
-    lang = _TARGET_CODES.get((target or "zh").strip().lower(), target or "zh-CN")
+def _translate_chunk_transmart(chunk: str, target: str, timeout: float,
+                               hint: str = "") -> dict:
+    """腾讯交互翻译（transmart）的公开接口 —— 免 key、国内直连。
+
+    为什么用它当兜底：Yandex 那个公开接口已经停用（403 Session is invalid /
+    410 API v1 is no longer active），而 Google 的 translate_a/single 现在
+    一律 429。腾讯这个接口是 `transmart.qq.com` 网页版自己在用的，
+    不需要注册、不需要 API key，自动识别源语言。
+
+    请求要点（少一个字段它就报 "Invalid value of source.text_list"）：
+      · `header.fn` = "auto_translation"
+      · `header.client_key` = 前端那个固定形状的串
+      · `source.text_list` 必须是**数组**，不能是 `source.text`
+      · `target.lang` 用两字母码（zh / en / ja / ko）
+    """
+    # 腾讯只认两字母码，且不支持 zh-CN 这种带地区的
+    tgt = (target or "zh").strip().lower().split("-")[0] or "zh"
+    if len(chunk) > TRANSMART_MAX_CHARS:
+        return {"ok": False, "text": "",
+                "error": f"这段太长（{len(chunk)} 字符 > {TRANSMART_MAX_CHARS}）"}
+
+    # 源语言：先用猜出来的，猜错（或它自己识别失败）再退到 auto
+    cands = _source_candidates(chunk, hint) or ["auto"]
+    if "auto" not in cands:
+        cands = list(cands) + ["auto"]
+
+    payload_base = {
+        "header": {"fn": "auto_translation", "client_key": TRANSLATE_CLIENT_KEY},
+        "type": "plain",
+        "model_category": "normal",
+        "target": {"lang": tgt},
+    }
     err = "翻译结果为空"
-    for src in _source_candidates(chunk, hint):
-        form = urllib.parse.urlencode({
-            "text": chunk,
-            "lang": src + "-" + (lang.split("-")[0] or "zh"),
-        }).encode()
+    for src in cands:
+        payload = dict(payload_base)
+        payload["source"] = {"lang": src, "text_list": [chunk]}
         req = urllib.request.Request(
-            url, data=form,
+            "https://" + TRANSLATE_HOST + TRANSLATE_PATH,
+            data=json.dumps(payload).encode("utf-8"),
             headers={
-                "User-Agent": TRANSLATE_UA,
-                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": UA,
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://transmart.qq.com/zh-CN/index",
+                "Origin": "https://transmart.qq.com",
             },
         )
         try:
@@ -720,25 +812,41 @@ def _translate_chunk_yandex(chunk: str, target: str, timeout: float,
         except ValueError:
             err = "翻译服务返回的不是 JSON"
             continue
-        if j.get("code") not in (200, None):
-            err = f"翻译失败（code {j.get('code')}）"
+
+        # ★ 它不看 HTTP 状态码，一切都在 header.ret_code 里：
+        #   "succ" 才算成功；失败会带 message，比如
+        #   "Required engine is not found, please retry later"（语种没有引擎）
+        #   "Too many characters (over 6000) in block"
+        head = j.get("header") or {}
+        ret = str(head.get("ret_code") or "")
+        if ret != "succ":
+            msg = str(j.get("message") or "")
+            if "too many characters" in msg.lower():
+                return {"ok": False, "text": "",
+                        "error": f"这段太长（{len(chunk)} 字符）"}
+            if "engine is not found" in msg.lower():
+                err = f"这个语向（{src}→{tgt}）翻译引擎不支持"
+                continue
+            err = f"翻译失败（{ret or '未知'}）：{msg[:60]}"
             continue
-        lines = j.get("text") or []
-        got = ""
-        if isinstance(lines, list) and lines:
-            got = str(lines[0])
-        elif isinstance(lines, str) and lines:
-            got = lines
-        if not got.strip():
+
+        got = j.get("auto_translation") or []
+        if isinstance(got, list):
+            text = "\n".join(str(x) for x in got)
+        else:
+            text = str(got)
+        text = text.strip()
+        if not text:
             err = "翻译结果为空"
             continue
-        if got.strip().lower() == chunk.strip().lower():
+        # 原样吐回来 = 这个语向没生效
+        if text.lower() == chunk.strip().lower():
             err = f"语向 {src} 不被接受"
             continue
-        if _untranslated_ratio(chunk, got) >= 0.4:
+        if _untranslated_ratio(chunk, text) >= 0.4:
             err = f"语向 {src} 没翻出日语/韩语"
             continue
-        return {"ok": True, "text": got, "error": "", "source": src}
+        return {"ok": True, "text": text, "error": "", "source": src}
     return {"ok": False, "text": "", "error": err}
 
 
