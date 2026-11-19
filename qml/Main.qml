@@ -68,10 +68,17 @@ Window {
     // ---- B 站扫码登录
     property string biliLoginState: ""      // "" / loading / waiting / scanned / ok / expired
     property string biliQrKey: ""
+    // 是不是「切换账号」而不是首次登录。
+    // 区别只在文案上：切换时弹窗标题说「扫码登录新账号」，
+    // 并提示「扫码失败不影响当前已登录的账号」。
+    property bool biliSwitchMode: false
 
     function biliStartLogin() {
         biliLoginState = "loading";
         biliQrKey = "";
+        // ★ 申请二维码**不碰**现有登录态（core.biliLoginQr 只调 generate 接口）。
+        //   只有 biliLoginPoll 拿到 state=ok 时才会写入新凭据 ——
+        //   所以「切换账号」时扫码失败 / 取消，当前账号原样保留（用户要的行为）。
         var res = core.biliLoginQr();
         if (!res || res.ok !== true) {
             biliLoginState = "expired";
@@ -2286,6 +2293,22 @@ Window {
                                 visible: !core.biliLoggedIn
                                 label: "扫码登录"
                                 onClicked: biliLoginDlg.open()
+                            }
+                            ActionButton {
+                                objectName: "biliSwitchBtn"
+                                width: 92
+                                height: 30
+                                accent: false
+                                visible: core.biliLoggedIn
+                                label: "切换账号"
+                                onClicked: {
+                                    // 切换账号走同一个扫码弹窗。
+                                    // ★ 关键：**不清空当前凭据**。新的扫码成功才会顶替，
+                                    //   失败/取消就保持原来的账号 —— 用户不该因为
+                                    //   手滑点了切换、又扫失败，就被登出。
+                                    win.biliSwitchMode = true;
+                                    biliLoginDlg.open();
+                                }
                             }
                             ActionButton {
                                 objectName: "biliLogoutBtn"
@@ -5328,7 +5351,7 @@ Window {
                         anchors.left: parent.left
                         anchors.leftMargin: 20
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "扫码登录 B 站"
+                        text: win.biliSwitchMode ? "切换 B 站账号" : "扫码登录 B 站"
                         color: Theme.text
                         font.family: Theme.uiFont
                         font.pixelSize: 15
@@ -5392,6 +5415,22 @@ Window {
                         font.family: Theme.uiFont
                         font.pixelSize: 11
                         wrapMode: Text.WordWrap
+                    }
+
+                    // 切换账号时的安心提示：扫码失败 / 取消不会把当前账号踢掉
+                    Text {
+                        width: parent.width
+                        visible: win.biliSwitchMode && core.biliLoggedIn
+                        horizontalAlignment: Text.AlignHCenter
+                        text: "扫码成功才会顶替当前账号（"
+                              + (core.biliUserName.length > 0
+                                 ? core.biliUserName : ("UID " + core.biliUserId))
+                              + "）；失败或取消不受影响"
+                        color: Theme.textMute
+                        font.family: Theme.uiFont
+                        font.pixelSize: 10
+                        wrapMode: Text.WordWrap
+                        lineHeight: 1.4
                     }
 
                     Row {

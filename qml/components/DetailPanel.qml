@@ -1030,7 +1030,7 @@ Item {
         ActionButton {
             label: "播放"
             glyph: ""
-            width: actionsRow.avail * 0.19
+            width: actionsRow.avail * 0.2
             height: 38
             onClicked: panel.playVideo(panel.video.bvid || "")
         }
@@ -1042,7 +1042,7 @@ Item {
             objectName: "shareButton"
             label: "分享"
             glyph: ""
-            width: actionsRow.avail * 0.16
+            width: actionsRow.avail * 0.17
             height: 38
             onClicked: panel.shareVideo(panel.video || ({}))
         }
@@ -1050,7 +1050,7 @@ Item {
             label: "复制链接"
             glyph: ""
             accent: false
-            width: actionsRow.avail * 0.22
+            width: actionsRow.avail * 0.21
             height: 38
             onClicked: panel.copyLink(panel.video.bvid || "")
         }
@@ -1058,7 +1058,7 @@ Item {
             label: "浏览器"
             glyph: ""
             accent: false
-            width: actionsRow.avail * 0.20
+            width: actionsRow.avail * 0.2
             height: 38
             onClicked: panel.openUrl("https://www.bilibili.com/video/" + (panel.video.bvid || ""))
         }
@@ -1071,7 +1071,7 @@ Item {
             accent: core.biliLoggedIn
             enabledBtn: core.biliLoggedIn
                          && (panel.video.bvid || "").length > 0
-            width: actionsRow.avail * 0.23
+            width: actionsRow.avail * 0.22
             height: 38
             onClicked: {
                 if (!core.biliLoggedIn) {
