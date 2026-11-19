@@ -310,6 +310,36 @@ def name_prefix(name: str) -> str:
     return ""
 
 
+def natural_sort_key(text: str) -> tuple:
+    """「自然排序」的键：把数字当成数字比，而不是逐字符比字符串。
+
+    ★ 用户报的「黑喵0 → 黑喵10 → 黑喵1」：
+      纯字符串排序里 `'黑喵10' < '黑喵1服'`（因为 `'0' < '服'`），
+      于是 10 排在 1 前面。把连续数字切成整数段之后，
+      `黑喵1` 的键是 `['黑喵', 1, '']`、`黑喵10` 是 `['黑喵', 10, '']`，
+      自然就按 1 < 10 排了。
+
+    返回值形如 ``('黑喵', 1, '', ...)``，可以直接当 ``sort`` 的 key。
+    用 `(type_rank, value)` 元组保证「数字段」和「文字段」不会互相比出 TypeError。
+    """
+    raw = str(text or "")
+    out: list = []
+    for part in re.split(r"(\d+)", raw):
+        if not part:
+            continue
+        if part.isdigit():
+            # 数字段：转成 int 比较（前导 0 也按数值算，0123 与 123 同序）
+            out.append((1, int(part)))
+        else:
+            out.append((0, part.lower()))
+    return tuple(out)
+
+
+def _sort_key_name(row: dict) -> tuple:
+    """按名字排序：先自然序，名字一样再按地址兜底（保证顺序稳定）。"""
+    return (natural_sort_key(row.get("name") or ""), row.get("addr") or "")
+
+
 def host_of(addr: str) -> str:
     """取 ``host:port`` 里的 host（去掉 IPv6 的方括号）；取不到返回空串。"""
     try:
@@ -1280,7 +1310,8 @@ class ServerManager(QObject):
             "weight": lambda r: (-r["weight"], -r["players"], r["addr"]),
             "players": lambda r: (-r["players"], r["ms"] or 9999),
             "ping": lambda r: (r["ms"] or 9999, -r["players"]),
-            "name": lambda r: (r["name"] or r["addr"]).lower(),
+            # 名字用**自然排序**：黑喵1 → 黑喵2 → … → 黑喵10（不是 1 → 10 → 2）
+            "name": _sort_key_name,
         }.get(self._sort)
         if key:
             rows.sort(key=key)

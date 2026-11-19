@@ -628,7 +628,14 @@ Window {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: win.section = 1
+                            onClicked: {
+                                // ★ 进 MOD 页先把「会导致空列表」的筛选项复位：
+                                //   状态筛选（我的收藏 / 可更新 …）是跨会话记住的，
+                                //   上次停在「我的收藏」再点进来就像「自动跳过去」了。
+                                if (core.mods && core.mods.resetSessionFilters)
+                                    core.mods.resetSessionFilters();
+                                win.section = 1;
+                            }
                         }
                     }
 

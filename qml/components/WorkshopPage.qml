@@ -266,6 +266,9 @@ Item {
         page.pickedStats = ({});
         page.memberSeen = ({});
         page.memberDupIds = ({});
+        // 记下这次打开的「请求代次」：只有同代次的解析结果才允许渲染
+        page.probeSeq = (page.probeSeq === undefined || page.probeSeq === null)
+                        ? 1 : (Number(page.probeSeq) + 1);
         // 快速通道：先只解析本体，卡片点开就该立刻有内容可看
         page.mgr.probeWorkshopFast(item.id);
         // 统计数字单独补（官方接口才有，慢一点也没关系）
@@ -351,6 +354,11 @@ Item {
     function closeDetail() {
         page.detailOpen = false;
         page.detailStack = [];
+        // ★ 作废还在路上的解析结果：否则它回主线程时会把面板又打开
+        //   （用户报的「退出后加载好了又弹出来」）。
+        page.probeSeq = undefined;
+        if (page.mgr && page.mgr.cancelWorkshopProbe)
+            page.mgr.cancelWorkshopProbe();
     }
 
     function hasDepInfo() {
@@ -465,6 +473,19 @@ Item {
     }
 
     function onProbe(res) {
+        // ★ 用户已经关掉详情 / 又点了别的条目：这次结果作废，别再弹回来。
+        //   「点开一直没加载出来、退出后又自己弹出来」就是这么来的 ——
+        //   结果排队回主线程时面板已经关了，这里却照着结果把 detailOpen 重新设成 true。
+        if (!page.detailOpen || !page.picked || !page.picked.id) {
+            page.loadingDetail = false;
+            page.stage = "";
+            return;
+        }
+        if (res && res.seq !== undefined && page.probeSeq !== undefined
+                && Number(res.seq) !== Number(page.probeSeq)) {
+            // 序号对不上 = 这是一次旧请求的结果（用户已经关窗或换了条目）
+            return;
+        }
         page.loadingDetail = false;
         page.stage = "";
         page.probeFull = page.probeWantDeps;
@@ -2103,45 +2124,104 @@ Item {
                     }
 
                     // 缩略图条：一眼看到作者一共给了几张图，点哪张看哪张
-                    Row {
+                    //
+                    // ★ 用户报的「超过 7 张预览图，后面的藏在后面不显示」：
+                    //   这里原来是个**不能滚的 Row** —— 每张 58px + 6px 间距，
+                    //   抽屉宽度只放得下 7 张，第 8 张往后直接被裁在可视区外面，
+                    //   既看不到也没法点。现在换成横向 Flickable：
+                    //   内容多项时自己滚，并且挂一条横向滚动条 + 鼠标滚轮支持。
+                    Flickable {
+                        id: coverStrip
                         objectName: "wsCoverStrip"
                         width: parent.width
                         height: page.detailImages().length > 1 ? 44 : 0
                         visible: page.detailImages().length > 1
-                        spacing: 6
+                        contentWidth: coverRow.width
+                        contentHeight: height
+                        clip: true
+                        flickableDirection: Flickable.HorizontalFlick
+                        boundsBehavior: Flickable.StopAtBounds
 
-                        Repeater {
-                            model: page.detailImages()
-                            delegate: Rectangle {
-                                required property var modelData
-                                required property int index
-                                width: 58
-                                height: 40
-                                radius: 4
-                                clip: true
-                                color: Theme.surfaceSoft
-                                border.width: page.coverIndex === index ? 2 : 1
-                                border.color: page.coverIndex === index ? Theme.accent : Theme.border
+                        // 鼠标滚轮上下滚 → 横向滚这条缩略图（很符合「一排图」的直觉）
+                        MouseArea {
+                            anchors.fill: parent
+                            acceptedButtons: Qt.NoButton
+                            onWheel: function (wheel) {
+                                var step = wheel.angleDelta.y !== 0
+                                           ? wheel.angleDelta.y : wheel.angleDelta.x;
+                                var next = coverStrip.contentX - step;
+                                var maxX = Math.max(0, coverStrip.contentWidth
+                                                       - coverStrip.width);
+                                coverStrip.contentX = Math.max(0, Math.min(maxX, next));
+                                wheel.accepted = true;
+                            }
+                        }
 
-                                Image {
-                                    anchors.fill: parent
-                                    anchors.margins: 2
-                                    source: page.coverSourceAt(index)
-                                    fillMode: Image.PreserveAspectCrop
-                                    asynchronous: true
-                                    cache: true
-                                    sourceSize.width: 116
-                                    sourceSize.height: 80
-                                    opacity: status === Image.Ready ? 1 : 0
-                                    Behavior on opacity { NumberAnimation { duration: 150 } }
-                                }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: page.coverIndex = index
+                        Row {
+                            id: coverRow
+                            height: coverStrip.height
+                            spacing: 6
+
+                            Repeater {
+                                model: page.detailImages()
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    required property int index
+                                    width: 58
+                                    height: 40
+                                    radius: 4
+                                    clip: true
+                                    color: Theme.surfaceSoft
+                                    border.width: page.coverIndex === index ? 2 : 1
+                                    border.color: page.coverIndex === index ? Theme.accent : Theme.border
+
+                                    Image {
+                                        anchors.fill: parent
+                                        anchors.margins: 2
+                                        source: page.coverSourceAt(index)
+                                        fillMode: Image.PreserveAspectCrop
+                                        asynchronous: true
+                                        cache: true
+                                        sourceSize.width: 116
+                                        sourceSize.height: 80
+                                        opacity: status === Image.Ready ? 1 : 0
+                                        Behavior on opacity { NumberAnimation { duration: 150 } }
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: page.coverIndex = index
+                                    }
                                 }
                             }
                         }
+
+                        // 横向滚动条：图多到放不下时才有意义
+                        ScrollBar.horizontal: ScrollBar {
+                            policy: coverStrip.contentWidth > coverStrip.width
+                                    ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                            height: 6
+                            padding: 1
+                            contentItem: Rectangle {
+                                implicitHeight: 4
+                                radius: 2
+                                color: parent.pressed ? Theme.accent : Theme.scrim(0.25)
+                            }
+                            background: Item { }
+                        }
+                    }
+
+                    // 图多的时候给一句提示，免得用户以为「就这么几张」
+                    Text {
+                        objectName: "wsCoverMoreHint"
+                        width: parent.width
+                        visible: page.detailImages().length > 1
+                        text: "共 " + page.detailImages().length + " 张图"
+                              + (page.detailImages().length > 7
+                                 ? "（横向滚动 / 滚轮可看全部）" : "")
+                        color: Theme.textMute
+                        font.family: Theme.uiFont
+                        font.pixelSize: 9
                     }
 
                     Text {

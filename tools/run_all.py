@@ -88,6 +88,7 @@ DEFAULT_SUITE = [
     "round18_test",
     "round21_test",
     "round22_test",
+    "round23_test",
     "round12_test",
     "round12_ui_test",
     "round13_test",

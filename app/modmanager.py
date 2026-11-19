@@ -1051,6 +1051,39 @@ class ModManager(QObject):
         self._remember_filters()
         self.statusChanged.emit()
 
+    @Slot()
+    def resetSessionFilters(self) -> None:
+        """进入 MOD 页时把「只在一定条件下才看得见东西」的筛选项复位。
+
+        ★ 用户报的「每次点 MOD 管理自动跳到我的收藏」：
+          `_status_filter` 是**跨会话记住**的（`mod_status_filter` 存在 config 里），
+          上次看到「我的收藏」关掉软件，下次点进来还停在「我的收藏」——
+          看上去就是「自己跳过去了」，而且那时列表里常常只有几条甚至空的。
+
+        复位的只有**会导致空列表**的临时筛选项；关键词、类型、体积这些
+        用户手填的条件也一起清掉，等于「点进 MOD 页先看全部」。
+        """
+        # 只复位置空率高、且用户不会「特意想长久保留」的那几个
+        changed = False
+        if self._status_filter != 0:
+            self._status_filter = 0
+            changed = True
+        if self._filter:
+            self._filter = ""
+            changed = True
+        if self._category:
+            self._category = ""
+            changed = True
+        if self._min_mb or self._max_mb:
+            self._min_mb = 0.0
+            self._max_mb = 0.0
+            changed = True
+        if not changed:
+            return
+        self._apply_filter()
+        self._remember_filters()
+        self.statusChanged.emit()
+
     @Slot(int)
     def setSortMode(self, mode: int) -> None:
         """0=默认 1=优先看启用 2=优先看禁用 3=优先看收藏 4=字母排序 5=最近导入"""
@@ -2365,16 +2398,40 @@ class ModManager(QObject):
             except Exception:  # noqa: BLE001
                 pass
         self._probing = True
+        # ★ 每次解析带一个自增序号，emit 时一起带回去。
+        #   用户关掉详情面板后 QML 会调 cancelWorkshopProbe() 把 _probe_seq 再 +1，
+        #   于是「还在路上的那次结果」回来时序号就对不上，QML 直接丢弃它 ——
+        #   这就是「点开没加载出来、退出后又自己弹出来」的根因：
+        #   结果排队回主线程时面板已经关了，QML 却照着结果把 detailOpen 又设成 true。
+        self._probe_seq = int(getattr(self, "_probe_seq", 0)) + 1
         self._set_status("正在解析创意工坊链接…")
         threading.Thread(target=self._probe_worker,
-                         args=(str(text or ""), bool(want_deps)),
+                         args=(str(text or ""), bool(want_deps), self._probe_seq),
                          daemon=True).start()
 
-    def _probe_worker(self, text: str, want_deps: bool = True) -> None:
+    @Slot()
+    def cancelWorkshopProbe(self) -> None:
+        """用户关掉详情：作废「还在路上」的解析结果，别再弹回来。
+
+        序号 +1 就够了 —— 在跑的那次线程 emit 时带着旧序号，QML 一看不对就丢。
+        顺便叫停正在补合集成员的那个下载器，省点流量。
+        """
+        self._probe_seq = int(getattr(self, "_probe_seq", 0)) + 1
+        self._probe_queued = None
+        dl = getattr(self, "_probe_dl", None)
+        if dl is not None:
+            try:
+                dl.stop_streaming()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _probe_worker(self, text: str, want_deps: bool = True,
+                      seq: int = 0) -> None:
         """后台线程：解析 + 标注已安装，然后 emit 回主线程。
 
         `want_deps=False` 只解析本体（/合集的子项），不去翻每个前置的详情页 ——
         浏览时点开一张卡片用这条快速通道，省掉 1-3 次网络往返。
+        `seq` 是发起时的请求序号，原样带回给 QML 判断「这次结果还有人要吗」。
         """
         try:
             d = WD.WorkshopDownloader(threads=self.downloadThreads,
@@ -2403,6 +2460,12 @@ class ModManager(QObject):
             res["gameRunning"] = M.is_game_running()
         # 先清标志再 emit，否则上一次没跑完的话后面所有解析都会被「叠着开」挡住
         self._probing = False
+        # 带上请求序号：QML 拿它和「当前还有效的序号」比，对不上就丢弃
+        # （用户已经关掉详情了，别再自己弹回来）
+        try:
+            res["seq"] = int(seq)
+        except (TypeError, ValueError):
+            res["seq"] = 0
         # 跨线程 emit，Qt 自动排队回主线程
         self.workshopProbed.emit(res)
         # 排队中的那一次（通常是「点开卡片」之后的「连前置一起下」）现在接着跑
