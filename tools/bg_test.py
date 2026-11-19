@@ -154,6 +154,12 @@ def main() -> int:
     check("非图片被拒绝", not bad.get("ok"), str(bad.get("error"))[:24])
 
     print("=== 2. 后端：设为背景 / 透明度 / 移除 ===")
+    # ★ 必须显式打开背景图总开关。
+    #   guard 会把用户真实的 config.json 拷进沙盒，里面 `bg_enabled` 可能是
+    #   False（用户在设置里把背景图关了）—— 那样后面「图层可见」必然失败，
+    #   但代码其实一点问题没有。测试不能依赖用户的开关状态。
+    core.setBgOn(True)
+    check("背景图总开关已打开（测试前置）", core.bgOn is True, str(core.bgOn))
     r = core.setBgImage(name)
     check("setBgImage 成功", bool(r.get("ok")))
     check("bgImageName 对得上", core.bgImageName == name, core.bgImageName)

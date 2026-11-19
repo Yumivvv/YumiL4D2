@@ -2154,19 +2154,34 @@ class ServerManager(QObject):
     #   换台电脑根本解不开，导出密文只会让对方拿到一串废数据，还多一层误会。
     #   所以导出的 `pw` 一律清空，导入时也不碰对方本机已有的密码。
     @Slot(str, result="QVariantMap")
-    def exportConfig(self, path: str) -> dict:
-        """把收藏的服务器（**不含密码**）写成 JSON。``path`` 为空就报错。"""
+    def exportConfig(self, path: str, addrs: list | None = None) -> dict:
+        """把收藏的服务器写成 JSON（**不含密码**）。``path`` 为空就报错。
+
+        ``addrs`` 有值时只导出这些地址（多选导出用），没给就导出全部。
+        **合集名一起导出**：`groupNames` 是 `{addr: 手动合集名}`，
+        只包含本次导出里确实带手动名的那些地址。
+        """
         target = str(path or "").strip()
         if not target:
             return {"ok": False, "error": "没有选保存位置", "count": 0}
         rows = self._favorites()
         if not rows:
             return {"ok": False, "error": "列表里还没有服务器", "count": 0}
+        if addrs:
+            wanted = {str(a or "").strip().lower() for a in addrs if str(a or "").strip()}
+            rows = [r for r in rows if str(r.get("addr") or "").lower() in wanted]
+            if not rows:
+                return {"ok": False, "error": "选中的服务器都不在了", "count": 0}
+        overrides = self._group_overrides()
+        group_names = {str(r["addr"]): overrides[str(r["addr"])]
+                       for r in rows if str(r["addr"]) in overrides}
         payload = {
             "_kind": "l42d.servers",
-            "_version": 1,
+            "_version": 2,
             "exportedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
             "count": len(rows),
+            # 手动改过的合集名：地址 → 名字（导入方据此还原用户的自定义分组）
+            "groupNames": group_names,
             "servers": [
                 {
                     "addr": r["addr"],
@@ -2175,6 +2190,8 @@ class ServerManager(QObject):
                     # 只保留地址，密码抹掉（见上面说明）
                     "panels": [{"url": p["url"], "pw": ""}
                                for p in (r.get("panels") or [])],
+                    # 顺手把「这台属于哪个合集」也写上（仅作参考，导入时以 groupNames 为准）
+                    "group": overrides.get(str(r["addr"])) or "",
                 }
                 for r in rows
             ],
@@ -2187,36 +2204,63 @@ class ServerManager(QObject):
             self._set_status(msg)
             self._toast(msg, "error")
             return {"ok": False, "error": msg, "count": 0}
-        self._set_status(f"已导出 {len(rows)} 台服务器")
-        self._toast(f"已导出 {len(rows)} 台服务器（不含面板密码）", "ok")
-        return {"ok": True, "count": len(rows), "path": target, "error": ""}
+        extra = f"，含 {len(group_names)} 个合集名" if group_names else ""
+        self._set_status(f"已导出 {len(rows)} 台服务器{extra}")
+        self._toast(f"已导出 {len(rows)} 台服务器（不含面板密码）{extra}", "ok")
+        return {"ok": True, "count": len(rows), "path": target,
+                "groups": len(group_names), "error": ""}
 
     @Slot(str, result="QVariantMap")
     def previewImport(self, path: str) -> dict:
         """导入前先看一眼：这个文件里有几台、几台是新的、几台重复。
 
-        不做任何写入 —— 界面先拿这个显示「将导入 N 台（M 台已存在）」，
+        不做任何写入 —— 界面先拿这个显示「将导入 N 台（M 台已存在）」+ **具体是哪些**，
         用户确认了才真的动。
+
+        ★ `names` 现在给**全部**新服务器（以前只给前 5 个，用户看不到全貌，
+          没法确认「这真是我要的那批配置」）。每条形如
+          ``「宿舍服」 1.2.3.4:27015``，带合集名的写成 ``「宿舍服」 1.2.3.4:27015 [合集名]``。
         """
         items, err = self._read_export(path)
         if err:
             return {"ok": False, "error": err, "total": 0, "fresh": 0,
-                    "duplicate": 0}
+                    "duplicate": 0, "names": []}
+        groups = self._read_export_groups(path)
         known = {r["addr"] for r in self._favorites()}
         fresh = [it for it in items if it["addr"] not in known]
+
+        def _label(it: dict) -> str:
+            name = str(it.get("name") or "").strip()
+            addr = it["addr"]
+            text = (f"「{name}」 {addr}" if name else addr)
+            g = str(groups.get(addr) or "").strip()
+            if g:
+                text += f"  [{g}]"
+            return text
+
+        # 界面最多铺 24 条（再多给它一个滚动区也读不完），剩下的只用数量说明
+        show = fresh[:24]
         return {"ok": True, "total": len(items), "fresh": len(fresh),
                 "duplicate": len(items) - len(fresh), "error": "",
-                "names": [it.get("name") or it["addr"] for it in fresh[:5]]}
+                "names": [_label(it) for it in show],
+                "more": max(0, len(fresh) - len(show)),
+                "groups": len({groups.get(it["addr"]) for it in fresh
+                               if groups.get(it["addr"])})}
 
     @Slot(str, result="QVariantMap")
     def importConfig(self, path: str) -> dict:
-        """导入服务器配置。**只加不删**，重复地址跳过（保留本机已有的名字/密码）。"""
+        """导入服务器配置。**只加不删**，重复地址跳过（保留本机已有的名字/密码）。
+
+        ★ 现在会**连合集名一起还原**（`groupNames`）：导入后那些服务器
+          仍然归在对方给它们起的合集里，不用再手动重命名一遍。
+        """
         items, err = self._read_export(path)
         if err:
             self._set_status(err)
             self._toast(err, "error")
             return {"ok": False, "error": err, "added": 0, "skipped": 0}
 
+        groups = self._read_export_groups(path)
         rows = self._favorites()
         known = {r["addr"] for r in rows}
         added = 0
@@ -2231,12 +2275,28 @@ class ServerManager(QObject):
                                     for p in (it.get("panels") or [])]})
             known.add(addr)
             added += 1
+        # 合集名：只给「这次真的导进来的地址」补，别把本机已有服务器改名
+        restored = 0
+        if groups:
+            cur = dict(self._group_overrides())
+            for it in items:
+                addr = it["addr"]
+                nm = str(groups.get(addr) or "").strip()
+                if nm and addr not in cur and addr in known:
+                    cur[addr] = nm[:24]
+                    restored += 1
+            if restored:
+                self.config["server_group_names"] = cur
+                self.config.save()
+
         skipped = len(items) - added
         if added:
             self._save_favorites(rows)
             self.serversChanged.emit()
             self.refreshAll()
         msg = f"导入了 {added} 台服务器" + (f"，{skipped} 台已存在跳过" if skipped else "")
+        if restored:
+            msg += f"，还原了 {restored} 个合集名"
         self._set_status(msg)
         if added:
             self._toast(msg, "ok")
@@ -2245,7 +2305,111 @@ class ServerManager(QObject):
         else:
             self._toast("这个文件里没有服务器", "warn")
         return {"ok": bool(added) or skipped > 0, "added": added,
-                "skipped": skipped, "error": "" if added else "没有新的可导入"}
+                "skipped": skipped, "groups": restored,
+                "error": "" if added else "没有新的可导入"}
+
+    @Slot("QVariantList", result="QVariantMap")
+    def importConfigs(self, paths: list) -> dict:
+        """一次导入多个 JSON（拖拽进来的那一堆文件）。
+
+        每个文件单独处理：能用的加进收藏，坏文件跳过但**不中断**，
+        最后汇总成一条提示（用户拖 5 个文件不该看到 5 条 toast）。
+        """
+        files = [str(p or "").strip() for p in (paths or []) if str(p or "").strip()]
+        if not files:
+            return {"ok": False, "added": 0, "skipped": 0, "failed": 0,
+                    "error": "没有可导入的文件"}
+        rows = self._favorites()
+        known = {r["addr"] for r in rows}
+        cur_groups = dict(self._group_overrides())
+        added = 0
+        skipped = 0
+        groups = 0
+        failed = 0
+        for path in files:
+            items, err = self._read_export(path)
+            if err:
+                failed += 1
+                continue
+            groups_map = self._read_export_groups(path)
+            for it in items:
+                addr = it["addr"]
+                if addr in known:
+                    skipped += 1
+                    continue
+                rows.append({"addr": addr, "name": it.get("name") or "",
+                             "weight": int(it.get("weight") or 0),
+                             "panels": [{"url": p["url"], "pw": ""}
+                                        for p in (it.get("panels") or [])]})
+                known.add(addr)
+                added += 1
+                nm = str(groups_map.get(addr) or "").strip()
+                if nm and addr not in cur_groups:
+                    cur_groups[addr] = nm[:24]
+                    groups += 1
+        if added:
+            self._save_favorites(rows)
+            if groups:
+                self.config["server_group_names"] = cur_groups
+                self.config.save()
+            self.serversChanged.emit()
+            self.refreshAll()
+
+        parts = [f"导入了 {added} 台服务器"]
+        if groups:
+            parts.append(f"{groups} 个合集名")
+        if skipped:
+            parts.append(f"{skipped} 台已存在")
+        if failed:
+            parts.append(f"{failed} 个文件读不了")
+        msg = "，".join(parts)
+        self._set_status(msg)
+        if added:
+            self._toast(msg, "ok")
+        elif failed and not skipped:
+            self._toast(f"这 {failed} 个文件都不是服务器配置", "error")
+        else:
+            self._toast(msg, "info")
+        return {"ok": added > 0, "added": added, "skipped": skipped,
+                "failed": failed, "groups": groups,
+                "error": "" if added else "没有新增服务器"}
+
+    def _read_export_groups(self, path: str) -> dict:
+        """读导出文件里的 `groupNames`（地址 → 手动合集名）；没有就返回空 dict。
+
+        兼容两种写法：顶层 `groupNames` 字典，或者每台服务器自带的 `group` 字段。
+        """
+        try:
+            with open(str(path or ""), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return {}
+        out: dict[str, str] = {}
+        if isinstance(data, dict):
+            raw = data.get("groupNames")
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    addr = str(k or "").strip().lower()
+                    name = str(v or "").strip()
+                    if addr and name:
+                        out[addr] = name[:24]
+            servers = data.get("servers")
+        elif isinstance(data, list):
+            servers = data
+        else:
+            servers = None
+        # 每台自带的 group 字段兜底（只补没写进 groupNames 的）
+        for it in (servers or []):
+            if not isinstance(it, dict):
+                continue
+            try:
+                addr = normalize_address(str(it.get("addr") or "")).lower()
+            except ServerError:
+                continue
+            name = str(it.get("group") or "").strip()
+            if addr and name and addr not in out:
+                out[addr] = name[:24]
+        return out
 
     def _read_export(self, path: str) -> tuple[list[dict], str]:
         """读导出文件，返回 ``(服务器列表, 错误)``。地址一律规范化 + 去重。"""

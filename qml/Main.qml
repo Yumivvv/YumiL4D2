@@ -1440,9 +1440,11 @@ Window {
                             // 分享：标题 + 视频链接 + 网盘链接和提取码，一次复制全
                             onShareVideo: function (v) { core.shareVideo(v); }
                             // 三连：调后端，返回 done / errors 两个列表。
-                            // ★ 后端现在**部分成功也算成功**（ok = 至少成功一项），
-                            //   所以这里把「做成了哪些」和「哪些没做成」一起显示，
-                            //   不再因为投币失败就把点赞收藏的成功回执吞掉。
+                            // ★ 后端**部分成功也算成功**（ok = 至少成功一项），
+                            //   所以这里把「做成了哪些」和「哪些没做成」拼成**一条**提示，
+                            //   既不因为投币失败就把点赞收藏的成功回执吞掉，
+                            //   也不会再出现「后端弹一条、这里又弹一条」的重复提示
+                            //   （后端已经不再自己弹 toast，统一由这里负责）。
                             onTriple: function (bvid) {
                                 if (!bvid)
                                     return;
@@ -1453,9 +1455,11 @@ Window {
                                 var errList = res.errors || [];
                                 if (doneList.length > 0 && errList.length > 0) {
                                     win.toast("已支持创作者：" + doneList.join("、")
-                                              + "；" + errList.join("；"), "warn");
+                                              + "；未完成：" + errList.join("；"), "warn");
                                 } else if (doneList.length > 0) {
                                     win.toast("已支持创作者：" + doneList.join("、"), "ok");
+                                } else if (errList.length > 0) {
+                                    win.toast(errList.join("；"), "warn");
                                 } else if ((res.error || "").length > 0) {
                                     win.toast(res.error, "warn");
                                 }
@@ -1762,6 +1766,10 @@ Window {
                         // 这里只把请求转过去。
                         onRequestExport: srvExportDlg.open()
                         onRequestImport: srvImportDlg.open()
+                        // 拖拽导入：直接把那堆 .json 交给后端批量导入
+                        onRequestDropImport: function (paths) {
+                            core.servers.importConfigs(paths);
+                        }
                     }
                 }
 
@@ -6040,7 +6048,7 @@ Window {
         FileDialog {
             id: srvExportDlg
             objectName: "srvExportDlg"
-            title: "导出服务器配置（不含面板密码）"
+            title: "导出服务器配置（含合集名，不含面板密码）"
             fileMode: FileDialog.SaveFile
             defaultSuffix: "json"
             nameFilters: ["服务器配置 (*.json)", "所有文件 (*)"]
@@ -6049,39 +6057,57 @@ Window {
                 if (s.indexOf("file:///") === 0) s = s.substring(8);
                 else if (s.indexOf("file://") === 0) s = s.substring(7);
                 try { s = decodeURIComponent(s); } catch (e) { }
-                core.servers.exportConfig(s);
+                // 多选模式下只导出勾中的那些（serversPageItem.exportAddrs）
+                var picked = (serversPageItem && serversPageItem.exportAddrs)
+                             ? serversPageItem.exportAddrs : [];
+                core.servers.exportConfig(s, picked);
+                if (serversPageItem)
+                    serversPageItem.exportAddrs = [];
             }
         }
 
         // ------------------------------------------------ 服务器配置导入
+        // 支持多选：一次挑好几个 .json，走 importConfigs 批量导入
         FileDialog {
             id: srvImportDlg
             objectName: "srvImportDlg"
-            title: "导入服务器配置（.json）"
-            fileMode: FileDialog.OpenFile
+            title: "导入服务器配置（.json，可多选）"
+            fileMode: FileDialog.OpenFiles
             nameFilters: ["服务器配置 (*.json)", "所有文件 (*)"]
             onAccepted: {
-                var s = String(selectedFile);
-                if (s.indexOf("file:///") === 0) s = s.substring(8);
-                else if (s.indexOf("file://") === 0) s = s.substring(7);
-                try { s = decodeURIComponent(s); } catch (e) { }
-                // 先预览：说清楚有几台是新的、几台已存在，再让用户确认
-                var info = core.servers.previewImport(s);
-                if (!info || info.ok !== true) {
-                    win.toast((info && info.error) || "这个文件读不了", "error");
+                var files = selectedFiles || [];
+                var paths = [];
+                for (var i = 0; i < files.length; ++i) {
+                    var s = String(files[i]);
+                    if (s.indexOf("file:///") === 0) s = s.substring(8);
+                    else if (s.indexOf("file://") === 0) s = s.substring(7);
+                    try { s = decodeURIComponent(s); } catch (e) { }
+                    paths.push(s);
+                }
+                if (paths.length === 0)
+                    return;
+                if (paths.length === 1) {
+                    // 单个文件仍然走「先预览、再确认」，说清楚有几台新的
+                    var info = core.servers.previewImport(paths[0]);
+                    if (!info || info.ok !== true) {
+                        win.toast((info && info.error) || "这个文件读不了", "error");
+                        return;
+                    }
+                    if (info.total === 0) {
+                        win.toast("这个文件里没有服务器", "warn");
+                        return;
+                    }
+                    if (info.fresh === 0) {
+                        win.toast("这 " + info.duplicate + " 台都已经在列表里了", "info");
+                        return;
+                    }
+                    srvImportPath = paths[0];
+                    srvImportInfo = info;
+                    srvImportConfirm.open();
                     return;
                 }
-                if (info.total === 0) {
-                    win.toast("这个文件里没有服务器", "warn");
-                    return;
-                }
-                if (info.fresh === 0) {
-                    win.toast("这 " + info.duplicate + " 台都已经在列表里了", "info");
-                    return;
-                }
-                srvImportPath = s;
-                srvImportInfo = info;
-                srvImportConfirm.open();
+                // 多个文件：直接批量导入，汇总成一条提示
+                core.servers.importConfigs(paths);
             }
         }
 
@@ -6121,20 +6147,51 @@ Window {
                           + ((srvImportInfo.duplicate || 0) > 0
                              ? "（另有 " + srvImportInfo.duplicate
                                + " 台已在列表里，会跳过）" : "")
+                          + ((srvImportInfo.groups || 0) > 0
+                             ? "，含 " + srvImportInfo.groups + " 个合集名" : "")
                     color: Theme.ok
                     font.family: Theme.uiFont
                     font.pixelSize: 12
                     wrapMode: Text.WordWrap
                 }
+                // 具体清单：让用户能确认「这真是我要的那批配置」。
+                // 条目多了给一个固定高度的滚动区，别把弹窗撑出屏幕。
+                Flickable {
+                    id: importNamesFlick
+                    width: parent.width
+                    height: Math.min(140, importNamesCol.implicitHeight)
+                    visible: (srvImportInfo.names || []).length > 0
+                    contentWidth: width
+                    contentHeight: importNamesCol.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    flickableDirection: Flickable.VerticalFlick
+
+                    Column {
+                        id: importNamesCol
+                        width: importNamesFlick.width - 8
+                        spacing: 2
+                        Repeater {
+                            model: srvImportInfo.names || []
+                            delegate: Text {
+                                required property var modelData
+                                width: parent.width
+                                text: "· " + modelData
+                                color: Theme.textMute
+                                font.family: Theme.monoFont
+                                font.pixelSize: 10
+                                wrapMode: Text.WrapAnywhere
+                            }
+                        }
+                    }
+                }
                 Text {
                     width: parent.width
-                    visible: (srvImportInfo.names || []).length > 0
-                    text: (srvImportInfo.names || []).join("\n")
+                    visible: (srvImportInfo.more || 0) > 0
+                    text: "…… 还有 " + (srvImportInfo.more || 0) + " 台（列表里会全部导入）"
                     color: Theme.textMute
-                    font.family: Theme.monoFont
+                    font.family: Theme.uiFont
                     font.pixelSize: 10
-                    lineHeight: 1.4
-                    wrapMode: Text.WrapAnywhere
                 }
                 Text {
                     width: parent.width

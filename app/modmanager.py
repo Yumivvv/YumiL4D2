@@ -265,6 +265,9 @@ class ModManager(QObject):
         self._probe_queued: tuple | None = None   # 上一次没跑完时排队的那次解析
         self._probe_dl: WD.WorkshopDownloader | None = None   # 正在解析的那个下载器（补成员线程挂在它身上）
         self._translating = False
+        # 后台补封面的队列（超出即时上限的那批，见 _spawn_cover_backfill）
+        self._cover_queue: list = []
+        self._cover_filling = False
         # 工坊浏览状态
         self._browse_items: list = []
         self._browse_thumbs: list = []   # 和 items 一一对应的封面地址（已按节点改写）
@@ -1994,12 +1997,25 @@ class ModManager(QObject):
             tab_model = getattr(self, attr, None)
             if tab_model is None:
                 continue
+            # 同样：改名后旧 path 可能查不到，退到新 path
             t_row = tab_model.row_of_path(old_path)
+            if t_row < 0:
+                t_row = tab_model.row_of_path(new_path)
             if t_row >= 0:
                 tab_model.update_item(t_row, dict(decorated))
 
         # 2) 同步给当前显示的合并列表（该项可能被筛选隐藏，那就只留在 _all_ 里）
+        #
+        # ★ 这里必须**新旧 path 都试**。启用/禁用会改文件名
+        #   （`x.vpk` ↔ `x.vpk.disabled`），而 `_all` 里那一行现在装的是
+        #   **旧 path**；只用 old_path 查是查得到的，但下面 update_item 之后
+        #   `row_of_path` 的键就变成新 path 了。真正踩过的坑是反过来：
+        #   更早的实现在改名后就找不到行 → 走到 `self.scan()` 兜底 →
+        #   `beginResetModel` → **列表瞬间跳回顶部**（用户报的
+        #   「MOD 详情里禁用 MOD 直接跳到开头」）。两个键都试最稳。
         m_row = self._all.row_of_path(old_path)
+        if m_row < 0:
+            m_row = self._all.row_of_path(new_path)
         if m_row >= 0:
             self._all.update_item(m_row, dict(decorated))
 
@@ -2729,6 +2745,59 @@ class ModManager(QObject):
     META_FILL_LIMIT = 200
     COVER_FILL_LIMIT = 60
 
+    def _spawn_cover_backfill(self, jobs: list) -> None:
+        """后台慢慢给「超出即时上限」的那批 MOD 补封面。
+
+        `jobs` 是 ``[(wid, preview_url, vpk_path), ...]``。
+        这里刻意用**单独的低并发线程**、每张之间 sleep 一下：
+        封面是几百 KB 的图，一口气打太多既容易被限速，也会和用户正在做的事抢带宽。
+        """
+        if not jobs:
+            return
+        if getattr(self, "_cover_filling", False):
+            # 已经在补了：把新的排进队列，别开第二个线程
+            self._cover_queue.extend(jobs)
+            return
+        self._cover_queue = list(jobs)
+        self._cover_filling = True
+        threading.Thread(target=self._cover_backfill_worker, daemon=True).start()
+
+    def _cover_backfill_worker(self) -> None:
+        """后台补封面：每张间隔 120ms，别和用户抢带宽。"""
+        try:
+            while self._cover_queue and not self._closing:
+                wid, preview, vpk = self._cover_queue.pop(0)
+                if not preview:
+                    continue
+                try:
+                    path = vpk or ""
+                    if not path:
+                        # 没给 path 就按 <ID>.vpk 找一遍
+                        for folder in (self._addons_dir,
+                                       os.path.join(self._addons_dir, "workshop")):
+                            for name in (f"{wid}.vpk", f"{wid}.vpk.disabled"):
+                                cand = os.path.join(folder, name)
+                                if os.path.isfile(cand):
+                                    path = cand
+                                    break
+                            if path:
+                                break
+                    if path and self._place_cover_beside(path, wid, preview):
+                        continue
+                    self._wsc.download_cover(wid, preview)
+                except Exception as e:  # noqa: BLE001 单张失败不影响别的
+                    log(f"cover backfill failed {wid}: {e!r}")
+                time.sleep(0.12)
+        finally:
+            self._cover_filling = False
+            if not self._closing:
+                # 补完再让列表认一遍封面（不重扫盘，只贴元数据）
+                try:
+                    self._apply_meta_to_items()
+                    self.modsChanged.emit()
+                except RuntimeError:
+                    pass
+
     def _after_download(self, done: list) -> None:
         """下完的 MOD 补上工坊标题和封面（文件名已经是 <ID>.vpk 了）。
 
@@ -2784,7 +2853,20 @@ class ModManager(QObject):
                 # 连 vpk 都找不到（文件可能被移走了）：至少把缓存下下来，
                 # 下次扫到它 / 再检查时能直接用上，不用重新请求一遍。
                 self._wsc.download_cover(wid, v["preview"])
-        log(f"after download: meta {len(info)}/{len(todo)}, covers {got}")
+        # ★ 刚下完的这一批如果超过 COVER_FILL_LIMIT（60），后面那些**不会有封面**。
+        #   用户报的「创意工坊导入下载出来的 MOD 没有封面」有一半是这种情况：
+        #   一次导入合集几十上百个，只有前 60 个补了图。
+        #   这里把「超出上限、还没封面」的记下来，交给后台线程慢慢补，
+        #   不阻塞这次导入的收尾。
+        extra = [w for w in todo[self.COVER_FILL_LIMIT:]
+                 if (info.get(w) or {}).get("preview")
+                 and not self._has_cover_locally(w)]
+        if extra:
+            self._spawn_cover_backfill(
+                [(w, (info.get(w) or {}).get("preview") or "",
+                  path_of.get(w) or "") for w in extra])
+        log(f"after download: meta {len(info)}/{len(todo)}, covers {got}"
+            + (f", 后台补 {len(extra)} 张" if extra else ""))
         if self._closing:
             return
 

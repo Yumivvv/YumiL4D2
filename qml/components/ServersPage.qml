@@ -236,6 +236,8 @@ Item {
     // 这里只发信号，选完由 Main 回调 `onExportChosen(path)`。
     signal requestExport()
     signal requestImport()
+    // 拖拽导入：把 .json 文件拖进服务器页，直接走批量导入
+    signal requestDropImport(var paths)
 
     function askExport() {
         if (!page.mgr || page.mgr.serverCount === 0) {
@@ -248,6 +250,43 @@ Item {
 
     function askImport() {
         page.requestImport()
+    }
+
+    // 多选状态下导出：只导出勾中的那些（后端 exportConfig 支持 addrs 参数）
+    function askExportChecked() {
+        if (!page.mgr)
+            return
+        var picked = []
+        var cur = page.checked || {}
+        for (var k in cur)
+            if (cur[k]) picked.push(k)
+        if (picked.length === 0) {
+            page.hintText = "先勾选要导出的服务器"
+            page.hintAt = Date.now()
+            return
+        }
+        page.exportAddrs = picked
+        page.requestExport()
+    }
+
+    // 当前要导出的地址集合（空 = 全部）
+    property var exportAddrs: []
+
+    // 拖进来的一堆文件 → 交给 Main 去调 importConfigs
+    function handleDropped(urls) {
+        var paths = []
+        for (var i = 0; i < (urls || []).length; ++i) {
+            var u = String(urls[i] || "")
+            if (u.length === 0)
+                continue
+            // file:///C:/x/y.json → C:/x/y.json
+            u = u.replace(/^file:\/\/\//, "").replace(/^file:\/\//, "")
+            try { u = decodeURIComponent(u) } catch (e) { }
+            paths.push(u)
+        }
+        if (paths.length === 0)
+            return
+        page.requestDropImport(paths)
     }
 
     // ---------------------------------------------------- 分享 / 从文字导入
@@ -994,6 +1033,74 @@ Item {
         }
     }
 
+    // ------------------------------------------------------------ 拖拽导入
+    // 把 .json 配置文件直接拖进服务器页就能导入（可以一次拖多个）。
+    // 「添加服务器」弹窗、从文字导入、端口遍历都已经有各自入口，
+    // 这里专门省掉「点导入 → 在文件选择框里翻目录」那几步。
+    property bool dropActive: false
+    DropArea {
+        id: dropZone
+        objectName: "srvDropZone"
+        anchors.fill: parent
+        // 拖拽时要能看到下面的列表，所以只在拖动期间激活
+        onEntered: function (drag) {
+            if (!drag.hasUrls)
+                return;
+            page.dropActive = true;
+            drag.accepted = true;
+        }
+        onExited: page.dropActive = false
+        onDropped: function (drop) {
+            page.dropActive = false;
+            if (drop.hasUrls)
+                page.handleDropped(drop.urls);
+            drop.accepted = true;
+        }
+    }
+
+    // 拖拽时的整页高亮 + 说明
+    Rectangle {
+        objectName: "srvDropOverlay"
+        anchors.fill: parent
+        visible: page.dropActive
+        z: 500
+        color: Qt.rgba(page.accent.r, page.accent.g, page.accent.b, 0.10)
+        border.width: 2
+        border.color: page.accent
+        radius: Theme.radiusS
+        // 完全不吃鼠标：拖拽事件归 DropArea
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.NoButton
+        }
+        Column {
+            anchors.centerIn: parent
+            spacing: 8
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "\uE8B5"                  // Import
+                font.family: Theme.iconFont
+                font.pixelSize: 34
+                color: page.accent
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "松开即可导入服务器配置"
+                color: Theme.text
+                font.family: Theme.uiFont
+                font.pixelSize: 14
+                font.weight: Font.DemiBold
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "支持一次拖入多个 .json（合集名也会一起还原）"
+                color: Theme.textMute
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+            }
+        }
+    }
+
     // ------------------------------------------------------------ 页头
     Item {
         id: header
@@ -1089,10 +1196,18 @@ Item {
             IconButton {
                 objectName: "srvExportBtn"
                 glyph: "\uEDE1"          // Save / 导出
-                tip: "导出服务器配置（分享给别人用，不含密码）"
+                // 多选模式下 = 只导出勾中的那些
+                tip: page.selectMode
+                     ? "导出勾选的服务器配置（含合集名）"
+                     : "导出服务器配置（含合集名，不含密码）"
                 boxSize: 30
                 enabledBtn: page.mgr ? page.mgr.serverCount > 0 : false
-                onClicked: page.askExport()
+                onClicked: {
+                    if (page.selectMode)
+                        page.askExportChecked();
+                    else
+                        page.askExport();
+                }
             }
 
             IconButton {
@@ -3482,6 +3597,17 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 8
 
+                    // 导出选中：和「删除选中」一样只在多选栏里出现，
+                    // 放在「取消」左边（用户截图里指的位置）
+                    ActionButton {
+                        objectName: "srvSelExportBtn"
+                        width: 108
+                        height: 30
+                        accent: false
+                        label: "导出配置"
+                        enabledBtn: page.checkedCount() > 0
+                        onClicked: page.askExportChecked()
+                    }
                     ActionButton {
                         width: 76
                         height: 30
@@ -3979,7 +4105,7 @@ Item {
                         required property var modelData
                         required property int index
                         width: playerList.width - 8
-                        height: 26
+                        height: 28
                         radius: 6
                         color: index % 2 === 0 ? Theme.scrim(0.04) : "transparent"
 
@@ -3987,6 +4113,7 @@ Item {
                             anchors.left: parent.left
                             anchors.leftMargin: 8
                             anchors.verticalCenter: parent.verticalCenter
+                            // 右边那两块（时长 + 分数）加起来占 118px，名字这边让出来
                             width: parent.width - 130
                             text: modelData.name
                             color: Theme.text
@@ -3994,14 +4121,57 @@ Item {
                             font.pixelSize: 11
                             elide: Text.ElideRight
                         }
-                        Text {
+
+                        // ★ 在线时长 + 分数原来是**一行挤在一起、9px、textMute**：
+                        //   时长本来就是一串「01:23:45」，小字号 + 暗色 + 等宽字体挤在
+                        //   半透明条纹底上，几乎看不清（用户报的）。
+                        //   现在拆成两个**独立的小胶囊**：时长用稍亮的 textDim、字号提到 10，
+                        //   分数单独一个淡底块，两者不再糊成一团。
+                        Row {
                             anchors.right: parent.right
-                            anchors.rightMargin: 8
+                            anchors.rightMargin: 6
                             anchors.verticalCenter: parent.verticalCenter
-                            text: modelData.timeText + "   " + modelData.score + " 分"
-                            color: Theme.textMute
-                            font.family: Theme.monoFont
-                            font.pixelSize: 9
+                            spacing: 6
+
+                            // 在线时长：给个淡底 + 提亮，一眼能读出来
+                            Rectangle {
+                                height: 18
+                                width: timeText.width + 12
+                                radius: 4
+                                color: Theme.scrim(0.07)
+                                anchors.verticalCenter: parent.verticalCenter
+                                Text {
+                                    id: timeText
+                                    objectName: "srvPlayerTime"
+                                    anchors.centerIn: parent
+                                    text: modelData.timeText || "--:--"
+                                    // 比 body 暗一档但比原来亮：原来 textMute 太糊
+                                    color: Theme.textDim
+                                    font.family: Theme.monoFont
+                                    font.pixelSize: 10
+                                    font.weight: Font.DemiBold
+                                }
+                            }
+
+                            // 分数：和时长分开，别再用「   」硬拼
+                            Rectangle {
+                                height: 18
+                                width: scoreText.width + 10
+                                radius: 4
+                                color: Theme.scrim(0.04)
+                                anchors.verticalCenter: parent.verticalCenter
+                                Text {
+                                    id: scoreText
+                                    objectName: "srvPlayerScore"
+                                    anchors.centerIn: parent
+                                    text: (modelData.score === undefined
+                                           || modelData.score === null)
+                                          ? "-" : (modelData.score + " 分")
+                                    color: Theme.textMute
+                                    font.family: Theme.monoFont
+                                    font.pixelSize: 9
+                                }
+                            }
                         }
                     }
                 }

@@ -1186,10 +1186,19 @@ Item {
                     spacing: 8
 
                     ActionButton {
+                        objectName: "modToggleBtn"
                         width: parent.width
                         accent: !page.qSelected.enabled
                         label: page.qSelected.enabled ? "禁用MOD" : "启用MOD"
-                        onClicked: page.mgr.toggleEnabled(page.qSelected.path)
+                        onClicked: {
+                            // 记住网格位置：万一这次刷新导致模型重置，
+                            // 至少把滚动位置还原回去（用户报的「禁用后跳到开头」）
+                            if (grid)
+                                grid.rememberPos();
+                            page.mgr.toggleEnabled(page.qSelected.path);
+                            if (grid)
+                                grid.restorePos();
+                        }
                     }
 
                     // 更新状态不再单占一块：
@@ -1549,6 +1558,42 @@ Item {
             readonly property int cols: Math.max(2, Math.floor((width + page.gap) / (page.cardMin + page.gap)))
             cellWidth: Math.floor(width / cols)
             cellHeight: Math.floor(cellWidth * 0.60) + 82
+
+            // ★ 防「禁用 MOD 后列表跳回最开头」的兜底。
+            //   后端已经改成原位刷新（不 beginResetModel），但万一走到
+            //   `_apply_enabled` 的 scan() 兜底分支（比如刚导入就切换、
+            //   或者开了「只看已启用/已禁用」导致这一项要进出列表），
+            //   模型会整表重置，contentY 直接归零。
+            //   这里在切换动作前后记住位置，一旦发现被重置就还原。
+            property real _keepY: -1
+            property int _keepIdx: -1
+
+            function rememberPos() {
+                _keepY = contentY;
+                // 同时记下当前第一个可见项，模型重排后按它重新定位更准
+                var it = indexAt(width / 2, contentY + 8);
+                _keepIdx = it >= 0 ? it : -1;
+            }
+
+            function restorePos() {
+                if (_keepY < 0)
+                    return;
+                var want = _keepY;
+                var idx = _keepIdx;
+                // 等模型把新数据填好再动（同一帧里 model 还是旧的）
+                Qt.callLater(function () {
+                    if (idx >= 0 && grid.model && grid.model.rowCount
+                            && idx < grid.model.rowCount()) {
+                        grid.positionViewAtIndex(idx, GridView.Beginning);
+                        // positionViewAtIndex 会把项顶到最上面，再用差值补回像素偏移
+                        grid.contentY = want;
+                    } else if (Math.abs(grid.contentY - want) > 1) {
+                        grid.contentY = want;
+                    }
+                    grid._keepY = -1;
+                    grid._keepIdx = -1;
+                });
+            }
 
             ScrollBar.vertical: ScrollBar {
                 width: 12
@@ -2537,37 +2582,52 @@ Item {
             Row {
                 width: parent.width
                 spacing: 8
-                TextInput {
-                    id: wsInputField
-                    objectName: "wsInputField"
+                // ★ 外面套一层裁切容器：TextInput 自己**不做裁切**，
+                //   粘进去一个超长链接时文字会直接画到输入框外面、压住「解析」按钮
+                //   （用户报的「创意工坊导入输入框 UI 文字会超出」）。
+                //   Item + clip 把内容锁在框内，滚动由 TextInput 自己的
+                //   「光标跟随」处理（它在获得焦点时会自动横向滚动到光标处）。
+                Item {
+                    id: wsInputWrap
                     width: parent.width - 96
                     height: 36
-                    verticalAlignment: TextInput.AlignVCenter
-                    leftPadding: 10
-                    color: Theme.text
-                    font.family: Theme.monoFont
-                    font.pixelSize: 12
-                    text: page.wsInput
-                    selectByMouse: true
-                    onTextChanged: page.wsInput = text
-                    onAccepted: page.runProbe()
+                    clip: true
+
                     Rectangle {
                         anchors.fill: parent
-                        z: -1
                         radius: Theme.radiusXS
                         color: Theme.surfaceSoft
                         border.width: 1
                         border.color: wsInputField.activeFocus ? Theme.accent : Theme.border
                     }
-                    Text {
-                        anchors.left: parent.left
-                        anchors.leftMargin: 10
-                        anchors.verticalCenter: parent.verticalCenter
-                        visible: wsInputField.text.length === 0
-                        text: "粘贴链接或工坊 ID"
-                        color: Theme.textMute
-                        font.family: Theme.uiFont
-                        font.pixelSize: 11
+
+                    TextInput {
+                        id: wsInputField
+                        objectName: "wsInputField"
+                        anchors.fill: parent
+                        // 左右都留内边距：右边留给「光标 + 粘贴提示」，不然贴着边框
+                        leftPadding: 10
+                        rightPadding: 10
+                        verticalAlignment: TextInput.AlignVCenter
+                        clip: true
+                        color: Theme.text
+                        font.family: Theme.monoFont
+                        font.pixelSize: 12
+                        text: page.wsInput
+                        selectByMouse: true
+                        onTextChanged: page.wsInput = text
+                        onAccepted: page.runProbe()
+
+                        Text {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: wsInputField.text.length === 0
+                            text: "粘贴链接或工坊 ID"
+                            color: Theme.textMute
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                        }
                     }
                 }
                 ActionButton {

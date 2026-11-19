@@ -1479,19 +1479,18 @@ class Core(QObject):
         #   界面只显示「投币失败：…」，用户根本看不出「点赞和收藏其实已经成了」。
         #   现在分成：done 成功项、errors 失败项，两个都往界面传，
         #   ok 表示「至少成功了一项」。
+        #
+        # ★★ 这里**不再自己弹 toast**（原来会弹，QML 的 onTriple 又弹一次，
+        #    用户看到两条提示）。统一由界面用返回的 done / errors 拼**一条**提示。
+        #    status 栏仍然在这里写（它不是浮层，不会和 toast 打架）。
         ok = bool(done)
         if done and errors:
             msg = "；".join(errors) + "（已完成：" + "、".join(done) + "）"
-            self._set_status(msg)
-            self.toast(msg, "warn")
         elif done:
             msg = "、".join(done)
-            self.toast(f"已支持创作者：{msg}", "ok")
-            self._set_status(f"三连成功：{msg}")
         else:
             msg = "；".join(errors) if errors else "什么都没做"
-            self._set_status(msg)
-            self.toast(msg, "warn" if errors else "info")
+        self._set_status(("三连成功：" if ok else "") + msg)
         return {"ok": ok, "done": done, "skipped": skipped, "error": msg,
                 "errors": errors}
 

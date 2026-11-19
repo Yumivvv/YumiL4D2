@@ -53,6 +53,9 @@ ARCHIVE_EXTS = (".zip",)
 DISABLED_SUFFIX = ".vpk.disabled"
 WORKSHOP_API = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 WORKSHOP_PAGE = "https://steamcommunity.com/sharedfiles/filedetails/?id={}"
+# 项目自带的公开只读中转站：返回结构和官方 API 等价，但国内实测 1.5 秒 vs 官方 30 秒+。
+# 列表接口也在用同一个站的另一个路径（见 workshop_net.WORKSHOP_LIST_BASE）。
+WORKSHOP_RELAY_DETAIL = "https://l4d2-workshop.laoyutang.cn/detail?id={}"
 CACHE_DIR = os.path.join(DATA_DIR, "modcache")
 META_PATH = os.path.join(DATA_DIR, "modmeta.json")
 # 作者 Steam 昵称缓存（SteamID → 昵称）
@@ -553,6 +556,16 @@ class WorkshopClient:
         # 老缓存没有 tags 字段（分类功能是后加的），当作没缓存重新拉一次
         if item and item.get("title") and "tags" in item:
             return item
+        # ★ 失败的记录不能「永久占着位置」。
+        #   以前这里对 `ok: False` 的条目也直接返回 None（等于每次都重查），
+        #   但 `_meta` 里那条失败记录会一直在；而 `fetch()` 里「查不到也记一笔」
+        #   的注释写着「避免每次都重查」—— 两者互相矛盾。
+        #   现在明确：失败记录 30 分钟内有效（这段时间内不反复打接口），
+        #   过了就重新试 —— 这样「一次网络抖动」不会让某个 ID 永远没封面。
+        if item and not item.get("ok"):
+            age = time.time() - float(item.get("fetched_at") or 0)
+            if age < 1800:
+                return item
         return None
 
     def put(self, wid: str, info: dict) -> None:
@@ -597,6 +610,12 @@ class WorkshopClient:
                     "id": wid,
                     "title": (f.get("title") or "").strip() if ok else "",
                     "preview": (f.get("preview_url") or "") if ok else "",
+                    # 中转站额外给了多张预览图（官方 API 也有，但常常是空的）。
+                    # 存下来给「多封面」用；没有就是空列表。
+                    "previews": [
+                        str(u) for u in (f.get("previews") or [])
+                        if isinstance(u, str) and u.strip()
+                    ][:12] if ok else [],
                     "desc": (f.get("description") or "")[:400] if ok else "",
                     "size": int(f.get("file_size") or 0),
                     "created": int(f.get("time_created") or 0),
@@ -631,13 +650,71 @@ class WorkshopClient:
 
     @staticmethod
     def _query_batch(ids: list[str]) -> list[dict]:
-        """查一批工坊 ID。这个接口只支持 POST，网络抖动时重试。"""
+        """查一批工坊 ID，返回 publishedfiledetails 数组。
+
+        ★ 三级来源，从快到慢（**国内实测**，用户报的「查工坊 ID 半天没封面、一直失败」）：
+
+          1. **项目自带的中转站** `l4d2-workshop.laoyutang.cn/detail?id=`
+             —— 单个 ID 约 **1.5 秒**，返回字段和官方 API **完全等价**
+             （title / preview_url / previews / description / file_size / tags …），
+             而且不按批、逐个查也不会被限流。这是首选。
+          2. **Steam 官方** `ISteamRemoteStorage/GetPublishedFileDetails`
+             —— 能一次查 20 个，但国内实测**单次要 30 秒以上**（能连上但很慢），
+             所以只在中转站失败时兜底，且超时压到 (5,12) 秒。
+          3. 都不行就返回空，让上层记一笔、下次再试。
+
+        以前只有第 2 条，而且重试 4 次 × (10,30) 秒 —— 最坏 33 秒才失败，
+        列表里就一直空着封面。
+        """
+        out: list[dict] = []
+        missing: list[str] = []
+
+        # ---- 1) 中转站（逐个查，快且字段全）
+        for wid in ids:
+            row = WorkshopClient._query_relay(wid)
+            if row:
+                out.append(row)
+            else:
+                missing.append(wid)
+
+        # ---- 2) 官方 API 兜底（按 20 个一批）
+        for i in range(0, len(missing), 20):
+            batch = missing[i:i + 20]
+            out.extend(WorkshopClient._query_official(batch))
+        return out
+
+    @staticmethod
+    def _query_relay(wid: str) -> dict:
+        """从中转站查单个工坊条目；失败返回空 dict。"""
+        key = str(wid or "").strip()
+        if not key.isdigit():
+            return {}
+        try:
+            r = requests.get(
+                WORKSHOP_RELAY_DETAIL.format(key),
+                headers={"User-Agent": UA},
+                timeout=(4, 10),
+            )
+            if r.status_code != 200:
+                return {}
+            js = r.json()
+        except Exception:  # noqa: BLE001 —— 中转站挂了就走官方兜底，不吵
+            return {}
+        det = ((js or {}).get("response") or {}).get("publishedfiledetails") or []
+        if not det or not isinstance(det, list):
+            return {}
+        row = det[0]
+        return row if isinstance(row, dict) else {}
+
+    @staticmethod
+    def _query_official(ids: list[str]) -> list[dict]:
+        """官方 GetPublishedFileDetails（POST、按批），带短超时重试。"""
         payload = {"itemcount": len(ids)}
         for j, wid in enumerate(ids):
             payload[f"publishedfileids[{j}]"] = wid
 
         last_err = ""
-        for attempt in range(4):
+        for attempt in range(3):
             try:
                 r = requests.post(
                     WORKSHOP_API,
@@ -647,7 +724,7 @@ class WorkshopClient:
                         "Content-Type": "application/x-www-form-urlencoded",
                         "Accept": "application/json",
                     },
-                    timeout=(10, 30),
+                    timeout=(5, 12),
                 )
                 if r.status_code == 200:
                     js = r.json()
@@ -657,8 +734,9 @@ class WorkshopClient:
                 last_err = f"HTTP {r.status_code}"
             except Exception as e:  # noqa: BLE001
                 last_err = f"{e.__class__.__name__}"
-            log(f"workshop query retry {attempt + 1}/4: {last_err}")
-            time.sleep(1.2 + attempt * 1.0)
+            log(f"workshop query retry {attempt + 1}/3: {last_err}")
+            if attempt < 2:
+                time.sleep(0.6 + attempt * 0.7)
 
         log(f"workshop query failed for {len(ids)} ids: {last_err}")
         return []
