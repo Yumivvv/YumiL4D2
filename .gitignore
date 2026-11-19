@@ -1,0 +1,28 @@
+# ---- 运行时数据（都在 exe / 程序旁边，绝不进仓库）----
+data/
+downloads/
+backgrounds/*.jpeg
+backgrounds/*.jpg
+backgrounds/*.png
+sounds/*
+!sounds/bbb.mp3
+
+# ---- 打包产物 ----
+dist/
+build/
+*.spec.bak
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# ---- 临时 / 日志 ----
+*.log
+*.tmp
+tools/_*.py
