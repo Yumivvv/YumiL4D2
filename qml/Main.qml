@@ -1435,11 +1435,18 @@ Window {
                                     win.toast(res.error, "warn");
                                 }
                             }
-                            // 没登录时点三连：直接把人送到设置页
+                            // 没登录时点三连：先提示一句，**就地把二维码弹出来**。
+                            // ★ 以前是「关掉详情 + 跳到设置页」，用户点完三连得自己
+                            //   在设置页里再找一次登录入口，等于点了个寂寞。
+                            //   现在直接弹扫码窗，扫完不用动手就被顶替，回来再点一次三连。
+                            //   注意：这里**不关详情面板** —— 扫码窗是模态 Popup，
+                            //   盖在上面就行；关掉后详情还在，用户接着点三连。
                             onNeedLogin: function () {
-                                win.toast("请先在设置里登录 B 站账号，才能给创作者三连", "info");
-                                win.detailOpen = false;
-                                win.section = 5;
+                                win.toast("给创作者三连要先登录 B 站账号", "info");
+                                // 未登录的扫码登录，不是「切换账号」：
+                                // 标题和那句「顶替当前账号」的提示都不该出现。
+                                win.biliSwitchMode = false;
+                                biliLoginDlg.open();
                             }
                             // 下载视频：排进统一下载队列，进度在下载页里看
                             onDownloadVideo: function (bvid) {
@@ -2260,12 +2267,22 @@ Window {
                                 }
                             }
 
+                            // ★ 这一段必须限宽 + 省略。
+                            //   以前 Column 没有宽度、里面的 Text 也没 elide，B 站昵称
+                            //   最长 20 个字符，一个长名字就会把这一整行撑宽，右边那两颗
+                            //   「切换账号 / 退出」被顶到卡片外面去（用户报的
+                            //   「切换账号提示文字跳出 UI 范围」）。
+                            //   现在给它一个确定的可用宽度，超出的名字用 … 收尾。
                             Column {
+                                id: biliWhoCol
                                 anchors.verticalCenter: parent.verticalCenter
+                                // 头像 32 + 左右 padding 24 + 三个间距 30 + 两颗按钮 92+76
+                                width: Math.max(60, parent.width - 254)
                                 spacing: 2
                                 Text {
+                                    width: parent.width
                                     text: core.biliLoggedIn
-                                          ? ("已登录：" + (core.biliUserName.length > 0
+                                          ? ("已登录：" + ((core.biliUserName || "").length > 0
                                                         ? core.biliUserName
                                                         : ("UID " + core.biliUserId)))
                                           : "未登录"
@@ -2273,14 +2290,19 @@ Window {
                                     font.family: Theme.uiFont
                                     font.pixelSize: 12
                                     font.weight: Font.DemiBold
+                                    elide: Text.ElideRight
+                                    maximumLineCount: 1
                                 }
                                 Text {
+                                    width: parent.width
                                     text: core.biliLoggedIn
                                           ? "三连会以这个账号的身份操作"
                                           : "扫码登录后即可给创作者三连"
                                     color: Theme.textMute
                                     font.family: Theme.uiFont
                                     font.pixelSize: 10
+                                    elide: Text.ElideRight
+                                    maximumLineCount: 1
                                 }
                             }
 
@@ -2292,7 +2314,14 @@ Window {
                                 height: 30
                                 visible: !core.biliLoggedIn
                                 label: "扫码登录"
-                                onClicked: biliLoginDlg.open()
+                                onClicked: {
+                                    // ★ 从设置页的「扫码登录」进来是**首次登录**，
+                                    //   必须把 switchMode 归零：否则用户先点过一次
+                                    //   「切换账号」、关掉窗、再退出登录，这里会残留
+                                    //   true，弹窗标题和「顶替当前账号」那句提示就错了。
+                                    win.biliSwitchMode = false;
+                                    biliLoginDlg.open();
+                                }
                             }
                             ActionButton {
                                 objectName: "biliSwitchBtn"
@@ -5348,108 +5377,135 @@ Window {
                     width: parent.width
                     height: 48
                     Text {
+                        // 标题可能比弹窗还长（尤其切换账号时），必须给宽度 + 省略，
+                        // 否则它会把弹窗横向撑开、或者paint到边框外面。
                         anchors.left: parent.left
+                        anchors.right: parent.right
                         anchors.leftMargin: 20
+                        anchors.rightMargin: 20
                         anchors.verticalCenter: parent.verticalCenter
                         text: win.biliSwitchMode ? "切换 B 站账号" : "扫码登录 B 站"
                         color: Theme.text
                         font.family: Theme.uiFont
                         font.pixelSize: 15
                         font.weight: Font.Bold
+                        elide: Text.ElideRight
+                        maximumLineCount: 1
                     }
                 }
 
                 Rectangle { width: parent.width; height: 1; color: Theme.border }
 
+                // ★ 外面这层只负责上下留白；左右 20px 的内边距**不能**挂在这里。
+                //   Column 设了 leftPadding/rightPadding 之后，子项的
+                //   `width: parent.width` 拿到的仍是**整宽**（不含 padding 扣减），
+                //   于是每一条文字都从 +20 的位置起、再画满 360 —— 右边界跑到 380，
+                //   比弹窗（360）多出 20px，直接顶出边框。
+                //   用户报的「切换账号提示文字跳出 UI 范围」就是这个
+                //   （和当年用户协议弹窗里那个勾选框同一个坑）。
+                //   现在左右内边距交给下面这层正文 Column（x: 20 + 宽度 -40），
+                //   它的子项用 `width: parent.width` 正好落在 320 的安全区里。
                 Column {
+                    id: loginCol2
+                    objectName: "biliLoginCol"
                     width: parent.width
                     topPadding: 16
                     bottomPadding: 18
-                    leftPadding: 20
-                    rightPadding: 20
                     spacing: 12
 
-                    // 二维码
-                    Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        width: 200
-                        height: 200
-                        radius: 8
-                        color: "#ffffff"
-                        border.width: 1
-                        border.color: Theme.border
+                    Column {
+                        id: loginBody
+                        x: 20
+                        width: parent.width - 40
+                        spacing: 12
 
-                        Image {
-                            objectName: "biliQrImage"
-                            anchors.fill: parent
-                            anchors.margins: 8
-                            source: core.biliQrImage
-                            fillMode: Image.PreserveAspectFit
-                            asynchronous: true
-                            cache: false
-                            visible: core.biliQrImage.length > 0
+                        // 二维码
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: 200
+                            height: 200
+                            radius: 8
+                            color: "#ffffff"
+                            border.width: 1
+                            border.color: Theme.border
+
+                            Image {
+                                objectName: "biliQrImage"
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                source: core.biliQrImage
+                                fillMode: Image.PreserveAspectFit
+                                asynchronous: true
+                                cache: false
+                                visible: core.biliQrImage.length > 0
+                            }
+
+                            Text {
+                                anchors.centerIn: parent
+                                visible: core.biliQrImage.length === 0
+                                text: biliLoginState === "loading" ? "生成中…" : "点下面按钮生成"
+                                color: "#8a8f99"
+                                font.family: Theme.uiFont
+                                font.pixelSize: 11
+                            }
                         }
 
+                        // 状态提示
                         Text {
-                            anchors.centerIn: parent
-                            visible: core.biliQrImage.length === 0
-                            text: biliLoginState === "loading" ? "生成中…" : "点下面按钮生成"
-                            color: "#8a8f99"
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            text: biliLoginState === "waiting" ? "请用手机 B 站 App 扫一扫"
+                                  : biliLoginState === "scanned" ? "已扫码，请在手机上点「确认登录」"
+                                  : biliLoginState === "ok" ? "登录成功"
+                                  : biliLoginState === "expired" ? "二维码已过期，请重新生成"
+                                  : biliLoginState === "loading" ? "正在生成二维码…"
+                                  : "点「生成二维码」开始"
+                            color: biliLoginState === "ok" ? Theme.ok
+                                   : (biliLoginState === "expired" ? Theme.warn : Theme.textDim)
                             font.family: Theme.uiFont
                             font.pixelSize: 11
+                            wrapMode: Text.WordWrap
                         }
-                    }
 
-                    // 状态提示
-                    Text {
-                        width: parent.width
-                        horizontalAlignment: Text.AlignHCenter
-                        text: biliLoginState === "waiting" ? "请用手机 B 站 App 扫一扫"
-                              : biliLoginState === "scanned" ? "已扫码，请在手机上点「确认登录」"
-                              : biliLoginState === "ok" ? "登录成功"
-                              : biliLoginState === "expired" ? "二维码已过期，请重新生成"
-                              : biliLoginState === "loading" ? "正在生成二维码…"
-                              : "点「生成二维码」开始"
-                        color: biliLoginState === "ok" ? Theme.ok
-                               : (biliLoginState === "expired" ? Theme.warn : Theme.textDim)
-                        font.family: Theme.uiFont
-                        font.pixelSize: 11
-                        wrapMode: Text.WordWrap
-                    }
-
-                    // 切换账号时的安心提示：扫码失败 / 取消不会把当前账号踢掉
-                    Text {
-                        width: parent.width
-                        visible: win.biliSwitchMode && core.biliLoggedIn
-                        horizontalAlignment: Text.AlignHCenter
-                        text: "扫码成功才会顶替当前账号（"
-                              + (core.biliUserName.length > 0
-                                 ? core.biliUserName : ("UID " + core.biliUserId))
-                              + "）；失败或取消不受影响"
-                        color: Theme.textMute
-                        font.family: Theme.uiFont
-                        font.pixelSize: 10
-                        wrapMode: Text.WordWrap
-                        lineHeight: 1.4
-                    }
-
-                    Row {
-                        width: parent.width
-                        spacing: 8
-                        Item { width: 1; height: 1 }
-                        ActionButton {
-                            width: 96
-                            height: 32
-                            accent: false
-                            label: biliLoginState === "expired" ? "重新生成" : "生成二维码"
-                            onClicked: biliStartLogin()
+                        // 切换账号时的安心提示：扫码失败 / 取消不会把当前账号踢掉
+                        Text {
+                            width: parent.width
+                            visible: win.biliSwitchMode && core.biliLoggedIn
+                            horizontalAlignment: Text.AlignHCenter
+                            // 用代码块而不是一长串三元：昵称可能很长（B 站上限 20 字），
+                            // 拼出来的句子交给 wrapMode 折行，不要让它顶出边框。
+                            text: {
+                                var who = (core.biliUserName || "").length > 0
+                                          ? core.biliUserName
+                                          : ("UID " + core.biliUserId);
+                                return "扫码成功才会顶替当前账号（" + who
+                                       + "）；失败或取消不受影响";
+                            }
+                            color: Theme.textMute
+                            font.family: Theme.uiFont
+                            font.pixelSize: 10
+                            wrapMode: Text.WordWrap
+                            lineHeight: 1.4
                         }
-                        ActionButton {
-                            width: 76
-                            height: 32
-                            accent: false
-                            label: "关闭"
-                            onClicked: biliLoginDlg.close()
+
+                        Row {
+                            width: parent.width
+                            spacing: 8
+                            Item { width: 1; height: 1 }
+                            ActionButton {
+                                width: 96
+                                height: 32
+                                accent: false
+                                label: biliLoginState === "expired" ? "重新生成" : "生成二维码"
+                                onClicked: biliStartLogin()
+                            }
+                            ActionButton {
+                                width: 76
+                                height: 32
+                                accent: false
+                                label: "关闭"
+                                onClicked: biliLoginDlg.close()
+                            }
                         }
                     }
                 }

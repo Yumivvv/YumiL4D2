@@ -80,9 +80,13 @@ check("配置里的凭据已清空", core.config["bili_credentials"] == {},
 print()
 print("=== 4. 界面有 UID 兜底显示 ===")
 main_src = open(os.path.join("qml", "Main.qml"), encoding="utf-8").read()
-check("界面在昵称为空时回退到 UID",
-      'core.biliUserName.length > 0' in main_src
-      and 'UID ' in main_src)
+# ★ 断言用「带空值保护的写法」：(core.biliUserName || "").length > 0
+#   直接写 core.biliUserName.length 在用户名叫不出来时会抛 TypeError，
+#   所以这里两种写法都算过，但**必须真的回退到 UID** 才算。
+has_uid_fallback = ('(core.biliUserName || "").length > 0' in main_src
+                    or 'core.biliUserName.length > 0' in main_src)
+check("界面在昵称为空时回退到 UID", has_uid_fallback and 'UID ' in main_src,
+      has_uid_fallback)
 check("设置页打开时会刷新用户信息",
       "biliRefreshUser" in main_src)
 

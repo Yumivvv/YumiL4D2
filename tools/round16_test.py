@@ -168,10 +168,19 @@ def main() -> int:
 
     print("\n-- 7. 视频详情去掉「下载」按钮", flush=True)
     check("详情面板没有下载按钮了", 'objectName: "dlVideoButton"' not in detail_qml)
-    check("按钮数回到 4 个", detail_qml.count("ActionButton {") == 4,
+    # 现在是 5 颗：播放 / 分享 / 三连 / 复制链接 / 浏览器
+    # （三连是后加的，这一轮的断言当时还没跟着改，一直是红的）
+    check("按钮数是 5 个", detail_qml.count("ActionButton {") == 5,
           detail_qml.count("ActionButton {"))
-    check("四个按钮比例加起来就是 1.0",
-          all(x in detail_qml for x in ("0.30", "0.24", "0.22", "0.20")))
+    # 五颗等宽，比例加起来正好 1.0 —— 只要不再出现参差不齐的旧比例就说明没退化
+    import re as _re
+    _avail_ratios = [float(x) for x in _re.findall(
+        r"width:\s*actionsRow\.avail\s*\*\s*([0-9.]+)", detail_qml)]
+    check("五个按钮比例加起来就是 1.0",
+          len(_avail_ratios) == 5 and abs(sum(_avail_ratios) - 1.0) < 1e-6,
+          _avail_ratios)
+    check("五颗按钮等宽（比例相同）",
+          len(set(_avail_ratios)) == 1, _avail_ratios)
 
     print("\n-- 8. 筛选/排序跨重启记住", flush=True)
     check("有 _remember_filters", "_remember_filters" in mm_py)

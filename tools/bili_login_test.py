@@ -120,6 +120,60 @@ check("详情面板有 triple 信号", "signal triple(string bvid)" in detail_sr
 check("详情面板有 needLogin 信号", "signal needLogin()" in detail_src)
 
 print()
+print("=== 6b. 三连按钮：紧挨分享、等宽、未登录也能点 ===")
+# 用户报的两件事都在这一段：
+#   · 「三连」要在「分享」右边，位置和别的按钮对得齐
+#   · 没登录时点三连要提示登录 + 弹二维码（而不是点了没反应 / 被丢去设置页）
+row = detail_src[detail_src.index("id: actionsRow"):]
+order = [row.index('label: "%s"' % s) for s in ("播放", "分享", "三连",
+                                               "复制链接", "浏览器")]
+check("按钮顺序是 播放/分享/三连/复制链接/浏览器",
+      order == sorted(order), order)
+# 五颗按钮都必须用同一个比例，宽窄才会一致
+import re as _re
+ratio_vals = [float(x) for x in _re.findall(
+    r"width:\s*actionsRow\.avail\s*\*\s*([0-9.]+)", row)]
+check("五颗按钮各占一个比例（共 5 个）", len(ratio_vals) == 5, ratio_vals)
+check("五颗按钮等宽（比例全相同）",
+      len(set(ratio_vals)) == 1, ratio_vals)
+check("五个比例加起来正好 1.0（不会撑破 / 留空）",
+      abs(sum(ratio_vals) - 1.0) < 1e-6, sum(ratio_vals))
+# ★ 关键：enabledBtn 不能绑 core.biliLoggedIn。
+#   ActionButton 的 MouseArea 是 `enabled: enabledBtn`，绑上登录态就等于
+#   未登录时点击事件根本到不了 onClicked，needLogin 那条分支成死代码。
+triple_part = row[row.index('objectName: "tripleButton"'):]
+triple_part = triple_part[:triple_part.index("ActionButton {")]
+check("三连在未登录时也可点（enabledBtn 不绑登录态）",
+      "enabledBtn: core.biliLoggedIn" not in triple_part
+      and "enabledBtn: (panel.video.bvid" in triple_part)
+check("未登录点三连会发 needLogin", "panel.needLogin()" in triple_part)
+check("三连只在已登录时才用强调色", "accent: core.biliLoggedIn" in triple_part)
+
+# 主窗口收到 needLogin：提示 + 就地弹二维码，不再跳设置页
+need = main_src[main_src.index("onNeedLogin:"):]
+need = need[:need.index("onDownloadVideo:")]
+check("点三连会弹出扫码登录窗", "biliLoginDlg.open()" in need)
+check("不再把人丢去设置页", "win.section = 5" not in need)
+check("不关详情面板（扫完能接着点）", "win.detailOpen = false" not in need)
+check("未登录走「登录」而不是「切换账号」", "biliSwitchMode = false" in need)
+
+print()
+print("=== 6c. 弹窗文字不许越出边框 ===")
+# ★ 根因：Column 设了 leftPadding/rightPadding 之后，子项的 `width: parent.width`
+#   拿到的仍是**整宽**（不含 padding 扣减），文字右边界会比弹窗多出 20px。
+#   用户报的「切换账号提示文字跳出 UI 范围」就是它。
+login_block = main_src[main_src.index('id: biliLoginDlg'):]
+login_block = login_block[:login_block.index("clipAskDlg") if "clipAskDlg" in login_block
+                          else len(login_block)]
+check("登录弹窗正文用 x + (width - 40) 做左右留白",
+      'objectName: "biliLoginCol"' in login_block
+      and "x: 20" in login_block and "width: parent.width - 40" in login_block)
+check("弹窗正文不再用 leftPadding/rightPadding 塞左右边距",
+      "leftPadding: 20" not in login_block
+      and "rightPadding: 20" not in login_block)
+check("标题有 elide，不会把弹窗撑宽", "elide: Text.ElideRight" in login_block)
+
+print()
 print("=== 7. 还原配置 ===")
 core.config["bili_credentials"] = old_creds
 (core.config["bili_triple_like"], core.config["bili_triple_coin"],

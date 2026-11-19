@@ -1,4 +1,4 @@
-﻿"""跑全量回归，并且**不碰用户真实数据**。
+"""跑全量回归，并且**不碰用户真实数据**。
 
 为什么需要它：
 大部分测试会构造真的 `Core()`，而 `Core` 一启动就会读/写
@@ -70,6 +70,7 @@ DEFAULT_SUITE = [
     "resize_test",
     "detail_check",
     "video_detail_test",
+    "detail_actions_test",
     "onefile_paths_test",
     "servers_test",
     "downloads_test",

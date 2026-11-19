@@ -20,6 +20,7 @@ import L4D2
 // 右侧滑出的视频详情面板
 Item {
     id: panel
+    objectName: "dpPanel"
     property var video: ({})
     property var links: []          // 简介里提取出的网盘链接
     property bool showPanel: false
@@ -1011,8 +1012,20 @@ Item {
     //   被挤到面板外面看不见（用户报的「三连按钮 UI 有问题」）。
     //   现在用 (width - spacing*4) 作基数分配。
     //
-    // 顺序上「三连」放最右且用强调色：它是这个面板最想鼓励的动作
-    // （给 MOD 创作者点赞投币收藏）。
+    // 顺序：播放 / 分享 / 三连 / 复制链接 / 浏览器。
+    // 「三连」紧跟「分享」后面（用户要求）：它和分享一样是「对创作者好」的动作，
+    // 放在分享右边一眼就能看到；复制链接、浏览器这类搬运动作排在更右边。
+    //
+    // 五颗按钮等宽（各 0.2，加起来正好 1.0）：以前比例是
+    // 0.20/0.17/0.22/0.21/0.20，宽窄不一，「分享」被压得比别的窄一截，
+    // 看起来像没对齐。现在统一，「复制链接」那四个字也放得下
+    // （每颗约 82px，内部给文字留 58px，12px 字号四个汉字约 48px）。
+    //
+    // ★ 三连在**未登录时也必须可点**：点下去要提示登录并弹二维码。
+    //   以前这里写了 enabledBtn: core.biliLoggedIn，而 ActionButton 的
+    //   MouseArea 是 `enabled: enabledBtn` —— 未登录时点击事件根本不会到达
+    //   onClicked，那条 needLogin 分支等于永远走不到（用户点了没反应）。
+    //   所以「能不能点」只跟有没有 bvid 有关，「是不是强调色」才跟登录态有关。
     Row {
         id: actionsRow
         anchors.left: parent.left
@@ -1028,6 +1041,7 @@ Item {
         readonly property real avail: Math.max(0, width - spacing * 4)
 
         ActionButton {
+            objectName: "playButton"
             label: "播放"
             glyph: ""
             width: actionsRow.avail * 0.2
@@ -1042,36 +1056,20 @@ Item {
             objectName: "shareButton"
             label: "分享"
             glyph: ""
-            width: actionsRow.avail * 0.17
+            width: actionsRow.avail * 0.2
             height: 38
             onClicked: panel.shareVideo(panel.video || ({}))
         }
-        ActionButton {
-            label: "复制链接"
-            glyph: ""
-            accent: false
-            width: actionsRow.avail * 0.21
-            height: 38
-            onClicked: panel.copyLink(panel.video.bvid || "")
-        }
-        ActionButton {
-            label: "浏览器"
-            glyph: ""
-            accent: false
-            width: actionsRow.avail * 0.2
-            height: 38
-            onClicked: panel.openUrl("https://www.bilibili.com/video/" + (panel.video.bvid || ""))
-        }
         // 「三连」：给 UP 主点赞 / 投币 / 收藏（按设置里的开关）。
-        // 没登录时按钮置灰，点一下引导去设置里登录。
+        // 已登录时用强调色；未登录时保持普通样式但**照样可点**，
+        // 点下去由主窗口提示登录并直接弹二维码（见 needLogin）。
         ActionButton {
             objectName: "tripleButton"
-            label: core.biliLoggedIn ? "三连" : "三连"
+            label: "三连"
             glyph: ""
             accent: core.biliLoggedIn
-            enabledBtn: core.biliLoggedIn
-                         && (panel.video.bvid || "").length > 0
-            width: actionsRow.avail * 0.22
+            enabledBtn: (panel.video.bvid || "").length > 0
+            width: actionsRow.avail * 0.2
             height: 38
             onClicked: {
                 if (!core.biliLoggedIn) {
@@ -1080,6 +1078,24 @@ Item {
                 }
                 panel.triple(panel.video.bvid || "");
             }
+        }
+        ActionButton {
+            objectName: "copyLinkButton"
+            label: "复制链接"
+            glyph: ""
+            accent: false
+            width: actionsRow.avail * 0.2
+            height: 38
+            onClicked: panel.copyLink(panel.video.bvid || "")
+        }
+        ActionButton {
+            objectName: "browserButton"
+            label: "浏览器"
+            glyph: ""
+            accent: false
+            width: actionsRow.avail * 0.2
+            height: 38
+            onClicked: panel.openUrl("https://www.bilibili.com/video/" + (panel.video.bvid || ""))
         }
     }
 }
