@@ -92,6 +92,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 收藏的服务器：只存地址和备注名，实时状态（人数/地图/模式）查询时再生
     "servers": [],
     "servers_sort": "players",
+    # 手动改过的合集名：{addr: 组名}。自动识别不准时用户可以自己命名，
+    # 存这里而不是存到每台服务器的 name 上，是因为它描述的是「整组」。
+    "server_group_names": {},
     # 剪贴板里发现服务器地址时问一句「要不要导入」。默认开 —— 这是这次特意加的；
     # 嫌烦可以在设置里关掉（关掉后不再读剪贴板）。
     "clipboard_servers": True,
@@ -114,6 +117,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 默认关 —— 检查更新要走网络，不想每次启动都发请求的可以保持关闭，
     # 需要时到「关于」里手动点「检查更新」。
     "auto_check_update": False,
+    # 提取到网盘链接时自动三连（点赞/投币/收藏，按上面那几个开关）。
+    # 默认关：这是「顺手替用户做写操作」，必须用户自己打开才生效。
+    "bili_auto_triple_on_link": False,
     # 播放器音量（0-100）与静音状态，跨会话记住
     "player_volume": 80,
     "player_muted": False,

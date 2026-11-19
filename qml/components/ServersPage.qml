@@ -67,6 +67,10 @@ Item {
     // 点合集：切到那一组；再点一次「全部」就回全量
     function selectGroup(key) {
         page.groupKey = key
+        // ★ 告诉后端当前合集：分类条的数字必须跟着合集走，
+        //   否则会出现「分类上写 5、点进去一个都没有」。
+        if (page.mgr)
+            page.mgr.setGroupFilter(key)
         // 换合集等于换了一份列表，回到顶部是合理的
         srvList._anchorAddr = ""
         srvList.positionViewAtBeginning()
@@ -683,6 +687,32 @@ Item {
             page.openAddDialog(page.selected)
     }
 
+    // ---- 合集重命名（自动识别不准时的兜底）
+    property string renameKey: ""
+    property string renameLabel: ""
+    property string renameHint: ""
+    property bool renameOpen: false
+
+    function openRenameGroup(g) {
+        if (!g || !page.mgr)
+            return
+        page.renameKey = String(g.key || "")
+        page.renameLabel = String(g.label || "")
+        page.renameHint = (g.count || 0) + " 台服务器"
+        page.renameOpen = true
+    }
+
+    function applyRename() {
+        if (!page.mgr)
+            return
+        var res = page.mgr.renameGroup(page.renameKey, page.renameLabel)
+        if (res && res.ok) {
+            page.renameOpen = false
+            // 改名后合集 key 变了（手动名是 m: 开头），回到「全部」最不容易迷路
+            page.selectGroup("all")
+        }
+    }
+
     function openAddDialog(row) {
         if (!page.mgr)
             return
@@ -905,8 +935,11 @@ Item {
 
     // 首次进来就把列表接上（不然 allServers 要等到第一次 serversChanged 才有值）
     Component.onCompleted: {
-        if (page.mgr)
+        if (page.mgr) {
             page.allServers = page.mgr.servers
+            // 分类条的数字必须跟着合集走（后端 categories 会读这个 key）
+            page.mgr.setGroupFilter(page.groupKey)
+        }
     }
 
     Connections {
@@ -2538,6 +2571,27 @@ Item {
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: page.selectGroup(modelData.key)
                             }
+                            // 右键 / 悬浮出「改名」：自动识别不准时用户能自己命名
+                            MouseArea {
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                width: 20
+                                visible: modelData.kind !== "all" && modelData.kind !== "none"
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                ToolTip.visible: containsMouse
+                                ToolTip.text: "重命名这个合集"
+                                ToolTip.delay: 400
+                                onClicked: page.openRenameGroup(modelData)
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "\uE70F"          // Edit
+                                    font.family: Theme.iconFont
+                                    font.pixelSize: 10
+                                    color: parent.containsMouse ? page.accent : Theme.textMute
+                                }
+                            }
                         }
                     }
                 }
@@ -3947,6 +4001,116 @@ Item {
                     }
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------ 合集重命名
+    // 自动识别不准（比如名字没规律、前缀切不出来）时，让用户自己给合集起名。
+    // 名字存在 config 的 server_group_names 里，整组共用；清空 = 恢复自动识别。
+    Popup {
+        id: renameDlg
+        objectName: "srvRenameDlg"
+        visible: page.renameOpen
+        onClosed: page.renameOpen = false
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        anchors.centerIn: Overlay.overlay
+        padding: 20
+        contentWidth: 380
+        contentHeight: renameCol.implicitHeight
+
+        Overlay.modal: Rectangle { color: Qt.rgba(0, 0, 0, 0.55) }
+
+        background: Rectangle {
+            radius: 14
+            color: Theme.panel
+            border.width: 1
+            border.color: Theme.borderHi
+        }
+
+        contentItem: Column {
+            id: renameCol
+            width: 380
+            spacing: 10
+
+            Text {
+                text: "重命名合集"
+                color: Theme.text
+                font.family: Theme.uiFont
+                font.pixelSize: 15
+                font.weight: Font.DemiBold
+            }
+            Text {
+                width: parent.width
+                text: "自动识别不准时，可以自己给这个合集起个名字（" + page.renameHint + "）。"
+                      + "留空并确定 = 恢复自动识别。"
+                color: Theme.textMute
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.WordWrap
+                lineHeight: 1.4
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 36
+                radius: Theme.radiusXS
+                color: Theme.scrim(0.05)
+                border.width: 1
+                border.color: renameInput.activeFocus ? Theme.accent : Theme.border
+
+                TextInput {
+                    id: renameInput
+                    objectName: "srvRenameInput"
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    verticalAlignment: TextInput.AlignVCenter
+                    color: Theme.text
+                    font.family: Theme.uiFont
+                    font.pixelSize: 12
+                    selectByMouse: true
+                    maximumLength: 24
+                    text: page.renameLabel
+                    onTextChanged: page.renameLabel = text
+                    onAccepted: page.applyRename()
+                    Keys.onEscapePressed: page.renameOpen = false
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: renameInput.text.length === 0
+                        text: "给合集起个名字…"
+                        color: Theme.textMute
+                        font.family: Theme.uiFont
+                        font.pixelSize: 12
+                    }
+                }
+            }
+
+            Row {
+                width: parent.width
+                spacing: 8
+                Item { width: 1; height: 1 }
+                ActionButton {
+                    width: 88
+                    height: 32
+                    accent: false
+                    label: "取消"
+                    onClicked: page.renameOpen = false
+                }
+                ActionButton {
+                    objectName: "srvRenameOkBtn"
+                    width: 100
+                    height: 32
+                    label: "确定"
+                    onClicked: page.applyRename()
+                }
+            }
+        }
+
+        onOpened: {
+            renameInput.forceActiveFocus()
+            renameInput.selectAll()
         }
     }
 

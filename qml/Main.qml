@@ -2421,6 +2421,56 @@ Window {
                             }
                         }
                     }
+
+                    // ---- 提取到网盘链接时自动三连
+                    // ★ 这是**替用户做写操作**，所以默认关、开着的时候会明确提示一句。
+                    Rectangle {
+                        objectName: "biliAutoTripleCard"
+                        width: parent.width
+                        height: 58
+                        radius: Theme.radiusXS
+                        color: core.biliAutoTripleOnLink
+                               ? Qt.rgba(Theme.warn.r, Theme.warn.g, Theme.warn.b, 0.10)
+                               : Theme.scrim(0.03)
+                        border.width: 1
+                        border.color: core.biliAutoTripleOnLink
+                                      ? Qt.rgba(Theme.warn.r, Theme.warn.g, Theme.warn.b, 0.45)
+                                      : Theme.border
+
+                        Row {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 12
+                            anchors.right: parent.right
+                            anchors.rightMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 10
+                            Column {
+                                width: parent.width - 54
+                                spacing: 2
+                                Text {
+                                    text: "提取到网盘链接时自动三连"
+                                    color: Theme.text
+                                    font.family: Theme.uiFont
+                                    font.pixelSize: 12
+                                }
+                                Text {
+                                    width: parent.width
+                                    text: "打开详情、从简介里提取到网盘链接时，自动按上面的开关给该视频"
+                                          + "点赞/投币/收藏（每个视频只自动一次，未登录会跳过）"
+                                    color: Theme.textMute
+                                    font.family: Theme.uiFont
+                                    font.pixelSize: 10
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                            ToggleSwitch {
+                                objectName: "biliAutoTripleSwitch"
+                                anchors.verticalCenter: parent.verticalCenter
+                                checked: core.biliAutoTripleOnLink
+                                onToggled: function (v) { core.setBiliAutoTripleOnLink(v); }
+                            }
+                        }
+                    }
                 }
 
 

@@ -288,6 +288,8 @@ class Core(QObject):
         self._bili_qr_url = ""
         self._bili_qr_key = ""
         self._bili_qr_file = ""
+        # 已经自动三连过的视频（同一个视频只自动一次，否则每次开详情都投一次币）
+        self._auto_tripled: set[str] = set()
         self._restore_bili_login()
         self.model = VideoModel(self)
         # 自定义提示音：Qt 播放器必须活在主线程，所以统一由 Core 持有
@@ -1173,6 +1175,53 @@ class Core(QObject):
     def biliFollowOn(self) -> bool:
         return bool(self.config["bili_triple_follow"])
 
+    # ---- 「详情里提取到网盘链接就自动三连」
+    @Property(bool, notify=statusChanged)
+    def biliAutoTripleOnLink(self) -> bool:
+        """详情里提到网盘链接时，是否自动给这个视频三连。
+
+        默认关。开的时候会提示一句「这是替你在 B 站上点赞/投币/收藏」，
+        因为这是**写操作**，不该悄悄做。
+        """
+        return bool(self.config["bili_auto_triple_on_link"])
+
+    @Slot(bool)
+    def setBiliAutoTripleOnLink(self, v: bool) -> None:
+        on = bool(v)
+        self.config["bili_auto_triple_on_link"] = on
+        self.config.save()
+        self.statusChanged.emit()
+        if on:
+            self.toast(
+                "已开启：视频详情里提取到网盘链接时，会自动给该视频点赞/投币/收藏"
+                "（按下面的三连开关，未登录则跳过）", "warn")
+        else:
+            self.toast("已关闭自动三连", "info")
+
+    def maybeAutoTriple(self, bvid: str, links: list) -> None:
+        """详情解析出网盘链接后，按设置决定要不要自动三连一次。
+
+        ★ 只在**真的有链接**、**开关开着**、**已登录**、**这台视频还没自动三连过**
+          的情况下动作 —— 四个条件缺一不可：
+            · 没链接就没有「作者给了资源」这个前提，不该打扰；
+            · 没登录写不了，别弹错误；
+            · 同一个视频只自动一次，否则每次开详情都投一次币。
+        """
+        if not bvid or not links:
+            return
+        if not bool(self.config["bili_auto_triple_on_link"]):
+            return
+        if not self.client.logged_in():
+            return
+        wid = str(bvid)
+        if wid in self._auto_tripled:
+            return
+        self._auto_tripled.add(wid)
+        res = self.biliTriple(wid)
+        done = (res or {}).get("done") or []
+        if done:
+            self.toast(f"提取到网盘链接，已自动三连：{'、'.join(done)}", "ok")
+
     @Slot(bool)
     def setBiliLike(self, v: bool) -> None:
         self.config["bili_triple_like"] = bool(v)
@@ -1823,7 +1872,13 @@ class Core(QObject):
         # 只有用户还停在这个视频的详情上才推更新，
         # 否则在后台刷新别的视频会把已经切走的详情页覆盖掉。
         if self._detail_bvid == bvid:
-            self.detailReady.emit(self._detail_payload(rec))
+            payload = self._detail_payload(rec)
+            self.detailReady.emit(payload)
+            # 提取到网盘链接 → 按设置自动三连（四个前置条件见 maybeAutoTriple）
+            try:
+                self.maybeAutoTriple(bvid, payload.get("links") or [])
+            except Exception as e:  # noqa: BLE001 —— 自动三连失败不能影响详情显示
+                log(f"auto triple crashed {bvid}: {e!r}")
         # 这里**不能**调 _rebuild()：它会 beginResetModel，正在看的列表会直接
         # 跳回最顶上（「点开视频详情就滚回开头」就是这么来的）。
         # 详情加载只多了一点简介/封面，原位把那一行换掉就够。

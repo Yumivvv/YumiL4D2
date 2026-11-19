@@ -156,6 +156,47 @@ def server_category(name: str) -> str:
     return "other"
 
 
+# 「名字 → 分类」的关键词表里，这些词太宽泛，单独出现不足以定类。
+# ★ 用户报的「明明是战役服却归到其他」：`mutation` 那类里带了 `"mutation"`，
+#   而 `mod` 类里带了 `"mod"` —— 后者会命中 `modserver / modded` 这类，
+#   但真正的问题在于**顺序**：`mod` 排在最后，`战役/coop` 排在它前面，
+#   于是「模组战役服」被判成战役。这本身没错，错的是
+#   **`server_category()` 和 `parse_mode()` 用的是两套词表**，
+#   同一台服在列表上是「战役」，在分类条里却是「其他」（两边完全不同源）。
+#
+# 现在给分类加一条「名字猜不出来就借 mode 的结论」的兜底，见 `_merged()`；
+# 这里先把 `NAME_MODES` 里有、但 `SERVER_CATEGORIES` 里没有的模式补齐。
+_CATEGORY_EXTRA = (
+    # (key, 显示名, 关键词) —— 只补 SERVER_CATEGORIES 里缺的，已有的不重复
+    ("custom", "自定义", ("无限火力", "火力全开")),
+)
+
+
+def category_key_for_mode(mode_code: str) -> str:
+    """把 `parse_mode()` 的模式码映射成分类 key（对不上返回空串）。
+
+    两个函数的词表不同步时，这条映射保证「列表上写战役」的服，
+    在分类条里也能落到「战役」而不是「其他」。
+    """
+    code = (mode_code or "").strip().lower()
+    if not code:
+        return ""
+    mapping = {
+        "realismversus": "realismversus",
+        "versus": "versus",
+        "realism": "realism",
+        "coop": "coop",
+        "survival": "survival",
+        "scavenge": "scavenge",
+        "mutation": "mutation",
+        "holdout": "holdout",
+        "dash": "dash",
+        "shootzones": "shootzones",
+        "custom": "mod",
+    }
+    return mapping.get(code, "")
+
+
 def category_label(key: str) -> str:
     """分类 key → 中文显示名。"""
     for k, label, _words in SERVER_CATEGORIES:
@@ -218,14 +259,19 @@ def name_prefix(name: str) -> str:
     # 开头的方括号/圆括号标签（【CN】【天域】这类）：
     # 它**本身就是最可靠的系列名**（「【天域】3号线」→ 天域），
     # 所以优先用它当组名，而不是丢掉。
-    m_tag = re.match(r"^[【\[（(]([^】\]）)]{1,12})[】\]）)]\s*", text)
+    m_tag = re.match(r"^[【\[（(]([^】\]）)]{1,16})[】\]）)]\s*", text)
     if m_tag:
         tag = m_tag.group(1).strip()
         rest = text[m_tag.end():].strip()
+        # ★ 方括号里的标签也要**去掉尾部数字**，否则同一个服群会被拆成两组：
+        #   「【黑喵0】多人多特」→ 黑喵0、「【黑喵】多人战役#0」→ 黑喵
+        #   （用户报的「扫描后导入合集显示成 IP / 有前缀却识别不到」就是这个）。
+        tag_clean = re.sub(r"[\d]+\s*(服|号|区|线|#)?$", "", tag).strip()
         # 标签是地区码（CN/HK/TW/US…）时不算系列名，继续看后面的正文
         if not re.fullmatch(r"[A-Za-z]{2,4}", tag):
-            if len(tag) >= _GROUP_MIN and tag not in _GENERIC_PREFIX:
-                return tag[:_GROUP_MAX]
+            for cand in (tag_clean, tag):
+                if len(cand) >= _GROUP_MIN and cand not in _GENERIC_PREFIX:
+                    return cand[:_GROUP_MAX]
         text = rest
     if not text:
         return ""
@@ -282,7 +328,7 @@ def server_group(addr: str, name: str) -> str:
     return name_prefix(name)
 
 
-def group_servers(rows: list) -> list:
+def group_servers(rows: list, overrides: dict | None = None) -> list:
     """把服务器聚成合集，返回 ``[{key, label, kind, count, addrs, host}]``。
 
     ★ 用户原话：「如果少于 2 个同名类似服务器或 IP 那么弄到未分类里面」——
@@ -302,11 +348,16 @@ def group_servers(rows: list) -> list:
 
     组名怎么定：成员里**出现次数最多的名字前缀**，前缀全都不同就退回用 IP。
     最终**至少 2 台**才算合集，单台的进「未分类」。
+
+    ``overrides`` 是用户**手动改过的合集名**（``{addr: 组名}``）：组里任何一台
+    有手动名字，就整组用这个名字，自动识别不出来时用户也能自己命名
+    （用户原话：「添加手动修改合集名，这样防止还是识别不到，那么就可以自己修改合集名」）。
     """
     valid = [r for r in (rows or []) if str(r.get("addr") or "")]
     if not valid:
         return []
 
+    overrides = overrides or {}
     addrs = [str(r["addr"]) for r in valid]
 
     def name_of(r):
@@ -369,8 +420,20 @@ def group_servers(rows: list) -> list:
         group_host = hosts[idx[0]]
         if not label:
             label = group_host or "合集"
+        # ★ 用户手动命名优先：组里任何一台有手动合集名，就整组用这个名字。
+        #   这是「自动识别不出来时也能自己命名」的兜底，不能被自动结果盖掉。
+        manual = ""
+        for i in idx:
+            nm = str(overrides.get(addrs[i]) or "").strip()
+            if nm:
+                manual = nm
+                break
+        if manual:
+            label = manual
+            kind = "manual"
         out.append({
-            "key": ("n:" if kind == "name" else "i:") + label,
+            "key": ("n:" if kind == "name" else
+                    ("m:" if kind == "manual" else "i:")) + label,
             "label": label,
             "kind": kind,
             "count": len(idx),
@@ -1103,6 +1166,9 @@ class ServerManager(QObject):
         self._sort = str(self.config["servers_sort"] or "weight")
         if self._sort not in SORT_MODES:
             self._sort = "weight"
+        # 当前选中的合集（界面切换时写进来）。分类条的数字要跟着它走，
+        # 否则会出现「分类上写 5、点进去 0 个」。
+        self._group_key = "all"
         # 剪贴板监听：记住「上次看过的那段文字」，同一段只问一次
         self._clip_seen = ""
         self._clip_enabled = True
@@ -1189,9 +1255,14 @@ class ServerManager(QObject):
                 "mode": live.get("mode", ""),
                 "modeLabel": live.get("modeLabel", "未知"),
                 "modeSource": live.get("modeSource", ""),
-                # 自动分类：按「名字里的提示词」归类，界面上可以按类筛选
-                "category": server_category(
-                    fav.get("name") or live.get("name", "")),
+                # 自动分类：先按「名字里的提示词」归类，猜不出再借 mode 的结论。
+                # ★ 这两套词表本来是分开的（`SERVER_CATEGORIES` vs `NAME_MODES`），
+                #   于是会出现「卡片上写着战役、分类条里却是其他」的自相矛盾
+                #   （用户报的「明明是战役服却在其他里」）。现在加一条兜底：
+                #   名字猜不出来时，用 `parse_mode()` 已经算好的 mode 去映射分类。
+                "category": (server_category(
+                    fav.get("name") or live.get("name", "")) or
+                    category_key_for_mode(live.get("mode", "")) or "other"),
                 # 所属「系列」组名（同前缀 / 同 IP 的一组），空串 = 不归组
                 "group": server_group(
                     fav["addr"], fav.get("name") or live.get("name", "")),
@@ -1249,6 +1320,56 @@ class ServerManager(QObject):
     def sortMode(self) -> str:
         return self._sort
 
+    # -------------------------------------------------------------- 合集名手动覆盖
+    def _group_overrides(self) -> dict:
+        """读「手动改过的合集名」：``{addr: 组名}``。"""
+        raw = self.config["server_group_names"]
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, str] = {}
+        for k, v in raw.items():
+            addr = str(k or "").strip()
+            label = str(v or "").strip()
+            if addr and label:
+                out[addr] = label[:24]
+        return out
+
+    @Slot(str, str, result="QVariantMap")
+    def renameGroup(self, group_key: str, label: str) -> dict:
+        """给整个合集起个名字（自动识别不准时的兜底）。
+
+        把组里**每一台**都记上这个名字 —— 这样以后即使成员变了、
+        或者某一台单独跑到了别的组，手动名字也不会莫名其妙丢掉。
+        """
+        name = str(label or "").strip()[:24]
+        rows = self.groups
+        target = None
+        for g in rows:
+            if str(g.get("key") or "") == str(group_key or ""):
+                target = g
+                break
+        if target is None:
+            return {"ok": False, "error": "找不到这个合集"}
+        addrs = [str(a) for a in (target.get("addrs") or [])]
+        if not addrs:
+            return {"ok": False, "error": "这个合集里没有服务器"}
+
+        cur = dict(self._group_overrides())
+        if name:
+            for a in addrs:
+                cur[a] = name
+        else:
+            # 空名字 = 撤销手动命名，回到自动识别
+            for a in addrs:
+                cur.pop(a, None)
+        self.config["server_group_names"] = cur
+        self.config.save()
+        self.serversChanged.emit()
+        msg = f"合集已重命名为「{name}」" if name else "已恢复自动识别的合集名"
+        self._set_status(msg)
+        self._toast(msg, "ok" if name else "info")
+        return {"ok": True, "label": name, "count": len(addrs), "error": ""}
+
     @Property("QVariantList", notify=serversChanged)
     def groups(self) -> list:
         """当前列表里的「合集」，给界面的合集选择器用。
@@ -1260,7 +1381,7 @@ class ServerManager(QObject):
         这样选择器里永远是「全部 / 未分类 / 各合集」，用户不用猜。
         """
         rows = self._merged()
-        groups = group_servers(rows)
+        groups = group_servers(rows, self._group_overrides())
         in_group: set[str] = set()
         for g in groups:
             in_group.update(g.get("addrs") or [])
@@ -1277,13 +1398,18 @@ class ServerManager(QObject):
 
     @Property("QVariantList", notify=serversChanged)
     def categories(self) -> list:
-        """当前收藏里**实际存在的**分类，给界面的筛选条用。
+        """分类条：只统计**当前合集里**的服务器。
 
-        只返回有服务器的那些类（外加「全部」），这样分类条不会摆出一排
-        「清道夫 0 / 死守 0 / 跑酷 0」的空类目。
+        ★ 用户报的「点进合集，分类的数字还在、但点进去一个都没有」：
+          以前这里恒按**全部**服务器统计，而列表又按合集过滤过 ——
+          两个数是两套来源，于是分类条上写「战役 5」，点进去列表空。
+          现在按当前选中的合集算，数字和列表永远一致。
+
+        `groupKey` 由界面写进来（"all" = 不限制）。
         每项：{key, label, count}
         """
         rows = self._merged()
+        rows = self._rows_in_group(rows, getattr(self, "_group_key", "all"))
         counts: dict[str, int] = {}
         for r in rows:
             k = r.get("category") or "other"
@@ -1298,6 +1424,32 @@ class ServerManager(QObject):
         if counts.get("other"):
             out.append({"key": "other", "label": "其他", "count": counts["other"]})
         return out
+
+    def _rows_in_group(self, rows: list, group_key: str) -> list:
+        """按合集过滤行（和界面上的 `filterByGroup` 同一套语义）。"""
+        key = str(group_key or "all")
+        if key == "all":
+            return rows
+        groups = group_servers(rows, self._group_overrides())
+        addrs: list[str] = []
+        for g in groups:
+            if str(g.get("key") or "") == key:
+                addrs = [str(a) for a in (g.get("addrs") or [])]
+                break
+        if not addrs:
+            # 合集不存在（被删空了 / 提交存了旧 key）→ 当「全部」，别显示空列表
+            return rows
+        wanted = set(addrs)
+        return [r for r in rows if str(r.get("addr") or "") in wanted]
+
+    @Slot(str)
+    def setGroupFilter(self, group_key: str) -> None:
+        """界面切换合集时告诉后端，分类条的数字才会跟着变。"""
+        key = str(group_key or "all")
+        if key == getattr(self, "_group_key", "all"):
+            return
+        self._group_key = key
+        self.serversChanged.emit()
 
     def _set_status(self, text: str) -> None:
         self._status = text or ""
