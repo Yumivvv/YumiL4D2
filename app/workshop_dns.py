@@ -48,6 +48,26 @@ IP、甚至直接超时 —— 表现就是工坊封面空白、下载龟速。�
 没指定 DNS 时返回的就是标准库 `urlopen` 的响应本身（只额外补了个
 `.status_code`），行为和改造前一模一样 —— 这样调用方不用区分模式。
 
+## 出处与改动（回应 issue #1 第 3 条）
+
+这一段的**跨语言移植**来源是 LytVPK（LaoYutang，GPL-3.0）的
+`internal/network/workshop_dns.go`（`lookupIPv4` 与 `WorkshopDialer.DialContext`）：
+<https://github.com/LaoYutang/lytvpk/blob/c8c68819695dfc282c4d059f62e0bf7742befc50/internal/network/workshop_dns.go#L81-L115>
+
+沿用过来的部分（指结构和规则，代码是按 Go 逻辑用 Python 重写的，不是逐行翻译）：
+
+* `lookupIPv4` 的查找顺序：先在**同一条 DNS 响应**里顺着 CNAME 链找 A 记录，
+  只回了 CNAME 没带 A 时，拿目标名再问一次；
+* `maxWorkshopCNAMEHops = 8` 的跳数上限、成环检测，以及中文报错的措辞；
+* 「Host 头与 TLS SNI 保持域名、socket 只连到 IP」这个整体思路（`WorkshopDialer`）。
+
+本项目的改动：
+
+* 自带 DNS 报文编解码（UDP，失败回落 TCP），不依赖第三方库；
+* 把「TCP 建连 + TLS 握手」算成一次尝试，失败就换下一个 IP（见下节），
+  Go 版只负责 TCP、握手交给 `http.Transport`；
+* 解析失败时回落到系统解析并写 warning（见「排错顺序」）。
+
 ## 比 Go 版多做的一件事
 
 lytvpk 的 DialContext 只管 TCP：连上了就把 socket 交出去，由 http.Transport

@@ -84,19 +84,21 @@ check("有 _bare_pan_url 处理裸域名", "def _bare_pan_url" in
       open(os.path.join("app", "panlink.py"), encoding="utf-8").read())
 
 
-# ============================================ 3. 工坊详情快通道
-print("\n[3] 创意工坊详情走 /detail 快通道")
-check("有单条详情接口常量", "WORKSHOP_DETAIL_API" in PY_DL)
-check("有备份线路常量", "WORKSHOP_DETAIL_BACKUP" in PY_DL)
-check("接口路径是 /detail?id=", "/detail?id={}" in PY_DL)
-check("带 with_previews（多图）", "with_previews=1" in PY_DL)
-check("有 _details_one 快通道", "def _details_one" in PY_DL)
+# ============================================ 3. 工坊详情走 Steam 官方接口
+print("\n[3] 创意工坊详情走 Steam 官方（不再经过任何第三方中转）")
+check("只走 Steam 官方 GetPublishedFileDetails",
+      "GetPublishedFileDetails" in PY_DL)
+check("没有任何第三方中转地址残留（代码里）",
+      not any(("laoyutang" in ln) and not ln.strip().startswith("#")
+              for ln in PY_DL.splitlines()),
+      [ln.strip()[:60] for ln in PY_DL.splitlines()
+       if "laoyutang" in ln and not ln.strip().startswith("#")][:2])
+check("详情请求走 netclient 的统一证书",
+      "NC.post(" in PY_DL)
+check("有 _details_one 单条快通道", "def _details_one" in PY_DL)
 check("有 _details_parse_rows 复用字段映射",
       "def _details_parse_rows" in PY_DL)
-check("fetch_details 里 1~6 个 ID 走快通道",
-      "_details_one(w, timeout)" in PY_DL)
-check("主线路失败会退备份线路",
-      PY_DL.count("WORKSHOP_DETAIL_BACKUP") >= 2)
+check("fetch_details 里少量 ID 走单条", "_details_one(w, timeout)" in PY_DL)
 check("字段映射里保留了 previews 多图", '"previews"' in PY_DL)
 check("简介字段兼容 description（不同来源叫法不同）",
       'f.get("file_description") or f.get("description")' in PY_DL)

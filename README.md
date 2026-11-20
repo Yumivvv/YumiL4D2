@@ -29,6 +29,35 @@
 
 ![设置面板](docs/preview-settings.png)
 
+## 致谢
+
+本项目的产品思路与部分技术方案参考了开源项目
+**[LytVPK](https://github.com/LaoYutang/lytvpk)**（作者 LaoYutang），特此致谢。
+
+参考范围（代码均为本项目用 Python + QML 独立实现）：
+
+- **工坊浏览**：分类分组、单件／合集切换、排序、ID 直达、稍后看、合集子项展开
+- **MOD 加载顺序编辑器**：拖动排序 + 缺项标红的交互形态
+- **应用更新检查**：GitHub Releases + 从重定向 URL 的 `/tag/` 取版本号的思路
+- **CDN 优选**：测延迟挑最近节点的思路
+
+VPK 解析、A2S 查询、网盘链接提取、B 站登录等为独立实现。
+
+> **本项目不再调用 LytVPK 的任何线上服务。** 早期版本曾默认请求 LytVPK 运营的
+> 工坊列表／详情／解析／节点池／地图名**五个**接口，占用对方自费额度；
+> 在对方提出后已**全部移除**（见 [issue #1](https://github.com/Yumivvv/YumiL4D2/issues/1)）。
+> 现在工坊数据全部直连 Steam 官方 API，地图名与 CDN 节点用内置表。
+>
+> 说明：其余仍会联网的地方是**公开、免费、无需注册的**第三方站点 ——
+> 下载站 `steamworkshop.download`（工坊 MOD 直链）、翻译接口
+> MyMemory / 腾讯交互翻译、以及 B 站自己的网页与接口。
+> 它们与 LytVPK 无关，也不算「自建服务」。
+
+**关于 Steam API Key**：只有「工坊列表 / 搜索」需要你自己的 key
+（Steam 的 `QueryFiles` 接口强制要求），到
+<https://steamcommunity.com/dev/apikey> 免费申请后填进「设置 → 网络」。
+key 只存本地，不上传。详情、下载、合集展开都不需要 key。
+
 ## 为什么用 Python + Qt Quick（QML）
 
 你电脑上现成的环境：
@@ -345,28 +374,31 @@ VPK 里通常带两样东西：
 
 > 能做到 0.4 秒是因为有磁盘缓存：按「路径 + 大小 + mtime」判断，文件没变就不重解析。
 
-### 查工坊详情为什么曾经「半天没封面」（已修，快 24 倍）
+### 查工坊详情为什么曾经「半天没封面」（已修）
 
-用户报的「查工坊 ID 半天没封面、一直失败」。实测下来**不是接口不通，是等得太久**：
+用户报的「查工坊 ID 半天没封面、一直失败」。**根因是证书，不是接口**：
 
-| 来源 | 国内实测 | 说明 |
-| --- | --- | --- |
-| Steam 官方 `GetPublishedFileDetails` | **33.6 秒** | 能连上，但很慢；旧代码还重试 4 次 ×（10,30）秒超时 + 1.2/2.2/3.2s 退避 |
-| **项目自带中转站** `l4d2-workshop.laoyutang.cn/detail?id=` | **1.36 秒** | 返回字段**和官方 API 完全等价**（title / preview_url / previews / description / file_size / tags / creator…） |
-| 封面图 `images.steamusercontent.com` | 0.8 秒 | 直连可下，JPEG 头正常 |
+`api.steampowered.com` 在国内装了加速/代理工具（Steam++、各种 GitHub 加速器）的机器上
+会被本机 MITM，那些工具把根证书装进 **Windows 证书库**——浏览器信、Go 程序也信，
+但 Python 的 `requests` 默认只信 `certifi`，于是直接抛 `SSLCertVerificationError`
+（0.2 秒就失败）。当时为了绕开，误用了第三方维护者自费运营的中转服务。
 
-所以现在改成**三级来源，从快到慢**：
+现在 `app/netclient.py` 统一解决：自建 SSLContext，
+**先加载系统证书库、再追加 certifi 的 CA**，两边都信。之后：
 
-1. **中转站优先**（逐个查，不按批也不会被限流）；
-2. 中转站查不到的 ID 再走**官方 API** 兜底（按 20 个一批，超时压到 `(5, 12)` 秒，最多重试 3 次）；
-3. 都不行就返回空，30 分钟后自动重试。
+| 来源 | 国内实测 |
+| --- | --- |
+| Steam 官方 `GetPublishedFileDetails`（走统一证书） | **0.2 秒** |
+| 工坊详情 `probe()` 端到端 | **0.26 秒** |
 
-顺带修了两个隐藏问题：
+所以**不再需要任何中转**，直接走 Steam 官方接口。
+
+顺带修的两个隐藏问题：
 
 - **失败缓存会永久占位**：以前某次网络抖动留下的 `ok: False` 记录会一直躺在那儿，
   导致那个 ID「永远没封面」。现在失败记录 **30 分钟内有效**，过期自动重查。
-- **`previews` 多图字段被丢掉了**：中转站和官方都会返回多张预览图，以前只取
-  `preview_url` 一张。现在存进 `previews`（最多 12 张），给「多封面」用。
+- **`previews` 多图字段被丢掉**：以前只取 `preview_url` 一张。现在把官方返回的
+  `previews`（若有）和简介里的 `[img]` 合并存进 `previews`（最多 12 张），给「多封面」用。
 
 **工坊导入一次下几十个 MOD 时，只有前 60 个补封面**（`COVER_FILL_LIMIT`）——
 超出的那些以前**永远没有封面**（用户报的「下载出来的 MOD 没有封面」有一半是这个）。
@@ -434,7 +466,7 @@ archiveIndex == 0x7FFF 表示数据就在本体（不是 _00N 分卷）
 - **点开详情不查下载直链**：查一次下载站要一秒多，细节留到点「下载」时在下载线程里
   现解析（`download()` 支持没有直链的条目）。所以单件 MOD 一两秒就出来，
   详情里会写一行「直链在下载时解析」。
-- **详情接口白送的直链直接用**：中转的详情接口除了标题/封面，还会给一个
+- **详情接口白送的直链直接用**：Steam 官方的详情接口除了标题/封面，还会给一个
   `file_url`（`https://cdn.steamusercontent.com/ugc/…`）。对**单文件 `.vpk`** 来说
   它就是下载直链，于是这一趟下载站都不用去了（实测能省 2~7 秒，而且下载站经常连不上）。
   两种情况下**不**吃它：合集条目返回的 `file_url` 其实是封面图（`images.steamusercontent.com`）；
@@ -466,7 +498,7 @@ Steam 会给一部分**普通 MOD 也带上 `num_children`**（实测「单件 M
 
 | 做 | 不做 |
 | --- | --- |
-| 官方/中转详情接口按 100 个一批拿标题和封面 | 不看简介、不查每个成员的下载直链 |
+| 官方详情接口按 100 个一批拿标题和封面 | 不看简介、不查每个成员的下载直链 |
 | 只列前 `COLLECT_FAST_LIMIT = 60` 个成员 | 不把 875 个成员一次铺进界面 |
 
 详情里会写明「这个合集一共 875 个成员」，并且**把成员一条条列出来**（封面 + 名字 + 体积，
@@ -479,38 +511,21 @@ Steam 会给一部分**普通 MOD 也带上 `num_children`**（实测「单件 M
 实测 875 个成员全部列完 12.6 秒，中途随时可以点某个成员直接看它自己的详情；
 你点开别的条目时 `stop_streaming()` 会让这个补成员的线程收工。
 
-### 单个 MOD 详情为什么曾经「点开一直在转」（已修，快 3.3 倍）
+### 单个 MOD 详情怎么做到「点开就有」
 
-参考项目 `lytvpk` 的 `internal/app/workshop_browser.go` 用的接口是：
+现在只走 **Steam 官方 `GetPublishedFileDetails`**（走 `netclient` 的统一证书）。
+实测 `probe()`（详情页真正走的那个函数）端到端 **0.26 秒**。
 
-```
-GET https://l4d2-workshop.laoyutang.cn/detail?id=<ID>&with_previews=1
-GET https://lytvpk-backup.laoyutang.cn/detail?id=<ID>&with_previews=1   ← 主备双线
-```
-
-而我们原来走的是**另一个域** `l4d2-workshop-parse.laoyutang.cn/`（批量 POST 接口）。
-同一个 ID 实测对比：
-
-| 接口 | 耗时 | 返回 |
-| --- | --- | --- |
-| `-parse` 批量（原来） | **2.15 秒** | 2020 字节 |
-| 主线路 `/detail?id=` | 0.87 秒 | 4075 字节（含 `previews` 多图） |
-| 备份线路 `/detail?id=` | 0.63~0.70 秒 | 4075 字节 |
-
-**快 2.5 倍、数据多 2 倍**，而且 `with_previews` 反而更快（省了一次 Steam 调用）。
-
-所以 `fetch_details()` 现在按**数量分流**：
+`fetch_details()` 按**数量分流**：
 
 | ID 数量 | 走哪条 |
 | --- | --- |
-| 1~6 个（详情页点开一张卡片就是这个量级） | **单条 `/detail` 快通道**，多线程并发 |
-| 更多（列表补封面、合集成员） | 原来的 `-parse` 批量（一次 100 个，那才是它的强项） |
-| 都不行 | Steam 官方 API 兜底 |
+| 1~6 个（详情页点开一张卡片就是这个量级） | 逐条并发查 |
+| 更多（列表补封面、合集成员） | 按 100 个一批并发 |
 
-快通道 `_details_one()` 主线路失败会**立刻退备份线路**（和 lytvpk 的主备双线一致）。
-字段映射抽成 `_details_parse_rows()`，两条路共用，不会出现「这边有 previews、那边没有」的偏差。
-
-实测 `probe()`（详情页真正走的那个函数）：**2.15 秒 → 0.66 秒**。
+> 历史：这里曾经为了绕开证书问题而调用第三方维护者自费运营的中转。
+> 在对方提出后已全部移除（见上文「致谢」）。证书问题由
+> `netclient` 统一解决后，官方接口本身就是最快的那条路。
 
 真点下载时才由后端把成员展开（`_expand_collections` → `fetch_collection`）：展开时顺手用
 详情接口**按 100 个一批**把成员的文件名、体积、封面和能用的直链一次问完，剩下没直链的
@@ -619,20 +634,22 @@ GridView 的 `model` 一换（追加时把整个数组换掉），滚动位置�
 > QML 的 `Image` 没法自己指定 SNI，把域名换成 IP 会证书不匹配，
 > 所以是**本机小代理**（只绑 `127.0.0.1`）代抓代压，QML 只管读 `127.0.0.1`。
 
-### 为什么列表要「中转」
+### 工坊列表为什么要自己的 Steam API Key
 
-这是硬限制，不是偷懒：
+这是 Steam 的硬限制，不是本项目偷懒：
 
 | 接口 | 情况 |
 | --- | --- |
 | `steamcommunity.com`（工坊网页） | 国内直连被重置（实测 `WinError 10054`），抓不了 |
-| `IPublishedFileService/QueryFiles`（官方列表） | **必须 publisher key**，官方文档明确写「不能被客户端直接调用」 |
-| `ISteamRemoteStorage/GetPublishedFileDetails`（详情） | 不需要 key，但**国内经常超时**，所以只当兜底 |
+| `IPublishedFileService/QueryFiles`（官方列表） | **必须带 key**，不带 key 实测 403 `Access is denied` |
+| `ISteamRemoteStorage/GetPublishedFileDetails`（详情） | **不需要 key**，国内可用 |
 
-所以：**列表**走一个公开的只读中转（社区工具常见做法），
-**详情**优先走另一个公开只读中转（`l4d2-workshop-parse.laoyutang.cn`，POST 一串 ID，
-一次最多 100 个，实测 3 个 ID 0.86 秒），拿不到才回落到官方接口。
-这样既不违反 Steam 的约束，国内也能用，详情页也不会一直转圈。
+所以：
+
+- **列表 / 搜索** → 官方 `QueryFiles`，用**你自己申请的 key**
+  （<https://steamcommunity.com/dev/apikey>，免费）。
+  没填 key 时列表页明确提示"需要 key"，**不会**悄悄调用任何第三方服务。
+- **详情 / 下载 / 合集展开** → 官方 `GetPublishedFileDetails`，不需要 key，照常可用。
 
 ### 网络加速（设置里）
 
@@ -658,7 +675,8 @@ GridView 的 `model` 一换（追加时把整个数组换掉），滚动位置�
 - 地址只在程序内部连机器时用（存在配置 `workshop_cdn_ip` 里）。
 - 手动填的地址会先校验（IPv4 逐段 ≤255、IPv6 走标准解析），
   填错只提示不写入，原来生效的那个不会被改掉。
-- 节点池来自公开的 IP 优选服务（`lytvpk-get-ips.laoyutang.cn`），拉不到就用内置的兜底。
+- 节点来源：**内置表 `BUILTIN_CDN_IPS`**（6 个常用 Akamai/Valve 节点，覆盖首尔/大阪）
+  + 你在设置里手动指定的 IP。不再向任何第三方服务要节点列表。
 - 判定「连得上」用的是 TCP 握手耗时，测速结果同时给「自动优选」用。
 
 > **实现上有个坑**：把域名换成 IP 之后，TLS 的 **SNI 必须仍然发域名**，
@@ -689,7 +707,7 @@ GridView 的 `model` 一换（追加时把整个数组换掉），滚动位置�
 
 ### 简介与翻译（在创意工坊详情里）
 
-工坊 MOD 的简介来自详情接口（中转给的字段是 `file_description`，官方是 `description`），
+工坊 MOD 的简介来自详情接口（官方字段是 `description`），
 里面是 BBCode，程序会用 `_plain_desc()` 收拾成能读的纯文本（`[h2]`、`[url=…]`、`[list][*]`
 这些换成对应符号或删掉），再显示在详情面板的「简介」下面。
 
@@ -1068,7 +1086,7 @@ Steam 的 `steam://connect/` 只吃字面 IP，喂它域名它会停在 `ExecCom
 | 名字 | A2S 回包里的服务器名，控制字符清零 |
 | 地区标签 | 名字里的 `【CN】` 这类方括号标签，抽出来单独上色（`0.无限火力【CN】` → 徽章 `CN`） |
 | 模式 | 先看 tags 里的 `m:coop` / `m:versus` / `m:realismversus` …；再看 tags 里的关键字；最后看**服务器名里的中文**（`对抗` / `写实` / `无限火力` / `多特` / `战役` …）；都不中显示「未知」 |
-| 地图 | A2S 的 `map` 字段（如 `c1m1_hotel`）→ 中文名接口 `l4d2-maps.laoyutang.cn` 给出 `死亡中心\|旅馆 [1/4]`，查一次缓存 7 天；服务器自己就给中文名（有些模组服会这么干）就直接用 |
+| 地图 | A2S 的 `map` 字段（如 `c1m1_hotel`）→ **内置表**（`_BUILTIN_MAPS`，覆盖官方 13 个战役全部章节）给出 `死亡中心\|旅馆`，查一次缓存；查不到就显示代码本身。服务器自己就给中文名（有些模组服会这么干）就直接用 |
 | 人数 | `players / maxPlayers`，BOT 数单独一行 |
 | 其他 | 版本号、VAC、要不要密码、UDP 往返毫秒（4 格信号按 <80 / <150 / <260 上色） |
 
@@ -1267,7 +1285,7 @@ https://pan.qu【删】ark.cn/s/e0066df91f26?pwd=5jiy
 | **普通页** | 页面里 `<iframe src="/fn?…">` | 进 iframe 取 `var wp_sign` 和 `var ajaxdata`，POST `action=downprocess&websignkey=<ajaxdata>&signs=<ajaxdata>&sign=<wp_sign>&websign=&kd=1&ves=1` |
 
 表单地址**不在分享页那个域名**：`https://apifile.woozooo.com/ajaxfile.php?file=<数字>`
-（页面里可能只给相对路径，要补全）。中转地址是 `dom + "/file/" + url`
+（页面里可能只给相对路径，要补全）。蓝奏云自己的跳转页是 `dom + "/file/" + url`
 （`url` 以 `?` 开头，漏掉 `/file/` 就是「文件未授权」）。
 
 再加上 ESA 挑战：页面里 `var arg1='<40位hex>'` 时，按固定置换表 + XOR 固定 key
@@ -2266,7 +2284,29 @@ MOD 直接下到 `addons/`。**单个 MOD 和合集都支持。**
   > 退出后它加载好又弹出来」）。根因：解析在后台线程跑，结果经信号排队回主线程，
   > 排队期间用户已经关掉了抽屉，而 `onProbe` 拿到结果后照样把 `detailOpen` 设回 true。
   > 现在每次解析带一个自增 **`seq`**，`closeDetail()` 调 `cancelWorkshopProbe()`
-  > 把序号再 +1；`onProbe` 先判 `detailOpen`、再比 `seq`，对不上直接丢弃。
+  > 才把序号作废；`onProbe` 先判 `detailOpen`、再比 `seq`，对不上直接丢弃。
+
+  > **★ 序号必须只有一个来源（这条踩过一次大坑，务必记住）**
+  >
+  > 加了 `seq` 校验之后，用户又报「创意工坊点进去**一直转圈**」。查下来是校验本身写错了：
+  >
+  > | | 旧写法（错） | 现在 |
+  > | --- | --- | --- |
+  > | QML 的序号 | 自己 `page.probeSeq + 1` | 取 `probeWorkshopFast()` 的**返回值** |
+  > | 后端 `res.seq` | `_probe_seq` 自增 | 同一个 `_probe_seq` |
+  > | 结果 | **两套计数器永远对不上** → 每个结果都被当「旧请求」丢掉 → `loadingDetail` 永远 false 不了 → 一直转圈 | 同一条流水线，必然对得上 |
+  >
+  > 而且 `page.probeSeq` **从没声明成属性**：QML 给未声明的属性赋值不会报错，
+  > 只会刷一句 `Cannot assign to non-existent property "probeSeq"` 然后**把赋值丢掉**，
+  > 读取时还是 `undefined`。现在显式声明成 `property int probeSeq: -1`，
+  > 用 `-1` 当「当前没有有效请求」的哨兵（比 `undefined` 好判，也不会被吞）。
+  >
+  > 还有一处：`_probing` 为真时新请求会**排队**，旧实现排队分支直接 `return`、
+  > **不返回序号**；排队项入队时也没带 seq，真正跑起来时又重新 +1 ——
+  > QML 记的那个号和结果里的号根本不是一个。现在入队就带 `seq`，跑完复用它。
+  >
+  > `tools/round27_test.py` 盯着这三件事：序号来源唯一、真实链路 `res.seq == 请求返回值`、
+  > 连点两次时序号递增且排队项带自己的 seq。
 
   > **这轮修的：「多张图只加载出封面」**。
   > `_desc_images()` 原来只认 `[img]…[/img]` 一种写法，而作者贴图的手法五花八门 ——

@@ -256,6 +256,19 @@ class ModManager(QObject):
             self._sort_mode = 0
         if self._status_filter not in (0, 1, 2, 3, 4, 5):
             self._status_filter = 0
+        # ★ 「状态筛选」是**会话级**的，不该跨启动保留。
+        #   用户报的「每次点 MOD 管理自动跳到我的收藏」就是它：上次停在
+        #   「我的收藏」(4) 关掉软件，下次启动还是 4，列表自然只剩几条甚至空的。
+        #   上一版是让 QML 在点导航时调 resetSessionFilters() 来复位 ——
+        #   但那只在「从界面点进去」时生效：后台扫描、测试、或者任何直接
+        #   构造 ModManager 的路径都绕过了它，于是同一个不一致又出现在别处
+        #   （`mod_update_test` 就是因为拿到残留的 4、把 3 个 MOD 全过滤掉才挂的）。
+        #   现在在**初始化**就归零，任何入口都一致。
+        self._status_filter = 0
+        self._filter = ""
+        self._category = ""
+        self._min_mb = 0.0
+        self._max_mb = 0.0
         self._delete_to_recycle = bool(self._cfg["delete_to_recycle"])
         # 创意工坊导入的并发线程数（设置里可调，1-16）
         self._dl_threads = WD.clamp_threads(self._cfg["download_threads"])
@@ -2385,27 +2398,43 @@ class ModManager(QObject):
         """
         self._probe_start(text, want_deps=True)
 
-    @Slot(str)
-    def probeWorkshopFast(self, text: str) -> None:
+    @Slot(str, result=int)
+    def probeWorkshopFast(self, text: str) -> int:
         """快速解析：只要本体 / 合集成员，不翻前置。工坊里点开卡片走这条。
 
         实测「点开一个 MOD → 能点下载」这条链路里，翻前置详情页占了大头，
         而浏览时用户根本还没决定要不要前置。
-        """
-        self._probe_start(text, want_deps=False)
 
-    def _probe_start(self, text: str, want_deps: bool) -> None:
+        **返回这次请求的序号**：QML 把它记下来，结果回来时比对，
+        对不上就说明这是旧请求（用户换了条目 / 关了面板），直接丢弃。
+        两边的序号必须是**同一个来源**，否则永远对不上（上一版就栽在这）。
+        """
+        return self._probe_start(text, want_deps=False)
+
+    def _probe_start(self, text: str, want_deps: bool) -> int:
+        """启动一次解析，返回**这次请求的序号**（供 QML 做「结果是不是我的」校验）。
+
+        ★ `_probing` 为真时旧实现是「排队 + 直接 return」，**不返回任何序号**，
+          于是 QML 那边记不到序号，比对时永远对不上 → 结果被当成旧请求丢掉 →
+          界面一直转圈。现在无论走哪条分支都返回序号。
+        """
         if not self._addons_dir:
+            self._probe_seq = int(getattr(self, "_probe_seq", 0)) + 1
             self.workshopProbed.emit({
                 "ok": False, "items": [],
                 "error": "还没设置 MOD 目录，先去设置里检测一下",
+                "seq": self._probe_seq,
             })
-            return
+            return self._probe_seq
+        # ★ 序号在**入口就 +1 并返回**：排队的那次也带着自己的序号，
+        #   QML 记下它，等它真正跑完 emit 时就能对上。
+        self._probe_seq = int(getattr(self, "_probe_seq", 0)) + 1
+        seq = self._probe_seq
         if getattr(self, "_probing", False):
             # 上一次还在跑：排队，等它 emit 完接着跑这一次（直接丢掉会让
             # 「点开卡片 → 立刻点下载」这条链路永远等不到结果）
-            self._probe_queued = (str(text or ""), bool(want_deps))
-            return
+            self._probe_queued = (str(text or ""), bool(want_deps), seq)
+            return seq
         # 用户又点开了别的条目：上一个还在后台补合集成员的线程可以收工了
         prev = getattr(self, "_probe_dl", None)
         if prev is not None:
@@ -2414,16 +2443,11 @@ class ModManager(QObject):
             except Exception:  # noqa: BLE001
                 pass
         self._probing = True
-        # ★ 每次解析带一个自增序号，emit 时一起带回去。
-        #   用户关掉详情面板后 QML 会调 cancelWorkshopProbe() 把 _probe_seq 再 +1，
-        #   于是「还在路上的那次结果」回来时序号就对不上，QML 直接丢弃它 ——
-        #   这就是「点开没加载出来、退出后又自己弹出来」的根因：
-        #   结果排队回主线程时面板已经关了，QML 却照着结果把 detailOpen 又设成 true。
-        self._probe_seq = int(getattr(self, "_probe_seq", 0)) + 1
         self._set_status("正在解析创意工坊链接…")
         threading.Thread(target=self._probe_worker,
-                         args=(str(text or ""), bool(want_deps), self._probe_seq),
+                         args=(str(text or ""), bool(want_deps), seq),
                          daemon=True).start()
+        return seq
 
     @Slot()
     def cancelWorkshopProbe(self) -> None:
@@ -2484,11 +2508,29 @@ class ModManager(QObject):
             res["seq"] = 0
         # 跨线程 emit，Qt 自动排队回主线程
         self.workshopProbed.emit(res)
-        # 排队中的那一次（通常是「点开卡片」之后的「连前置一起下」）现在接着跑
+        # 排队中的那一次（通常是「点开卡片」之后的「连前置一起下」）现在接着跑。
+        # 它入队时已经拿到自己的 seq，这里直接复用（不能再 +1，否则 QML 记的
+        # 序号就和它 emit 出去的对不上，界面会一直转圈）。
         nxt = getattr(self, "_probe_queued", None)
         if nxt and not self._closing:
             self._probe_queued = None
-            self._probe_start(nxt[0], nxt[1])
+            text, want_deps, queued_seq = (nxt + (None,))[:3]
+            if queued_seq is None:
+                queued_seq = int(getattr(self, "_probe_seq", 0)) + 1
+                self._probe_seq = queued_seq
+            dl = getattr(self, "_probe_dl", None)
+            if dl is not None:
+                try:
+                    dl.stop_streaming()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._probing = True
+            self._set_status("正在解析创意工坊链接…")
+            threading.Thread(
+                target=self._probe_worker,
+                args=(text, want_deps, queued_seq),
+                daemon=True,
+            ).start()
 
     def _on_probe_progress(self, stage: str, done: int, total: int) -> None:
         """后台线程里调用，转成信号让 UI 更新进度文字。"""
@@ -3646,7 +3688,12 @@ class ModManager(QObject):
 
         def worker() -> None:
             try:
-                res = WN.fetch_workshop_list(q, p, s, tags=tags, kind=k)
+                # ★ 列表接口（Steam QueryFiles）必须带用户自己的 API Key。
+                #   key 存在 config 里，由用户在「设置 → 网络」填；
+                #   没填时 fetch_workshop_list 会返回 needKey + 明确提示，
+                #   不会悄悄调任何第三方中转。
+                res = WN.fetch_workshop_list(q, p, s, tags=tags, kind=k,
+                                             api_key=self._steam_api_key())
             except Exception as e:  # noqa: BLE001
                 res = {"ok": False, "items": [], "total": 0,
                        "error": f"拉取列表出错：{e}"}
@@ -3656,6 +3703,37 @@ class ModManager(QObject):
                 pass
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _steam_api_key(self) -> str:
+        """读用户自己填的 Steam Web API Key（空串 = 没填）。"""
+        try:
+            return str(self._cfg["steam_api_key"] or "").strip()
+        except (KeyError, TypeError):
+            return ""
+
+    @Property(bool, notify=statusChanged)
+    def hasSteamApiKey(self) -> bool:
+        """列表搜索需要 key —— 界面据此提示用户去填。"""
+        return bool(self._steam_api_key())
+
+    @Property(str, notify=statusChanged)
+    def steamApiKeyHint(self) -> str:
+        return WN.NO_KEY_ERROR if not self._steam_api_key() else ""
+
+    @Slot(str)
+    def setSteamApiKey(self, value: str) -> None:
+        """保存用户的 Steam Web API Key（只存本地 config.json）。"""
+        key = str(value or "").strip()
+        self._cfg["steam_api_key"] = key
+        try:
+            self._cfg.save()
+        except Exception:  # noqa: BLE001
+            pass
+        if key:
+            self._set_status("已保存 Steam API Key，可以浏览工坊列表了")
+        else:
+            self._set_status("已清空 Steam API Key（列表搜索会不可用）")
+        self.statusChanged.emit()
 
     @Slot(str, str, str, "QVariantList")
     def browseFilter(self, query: str = "", sort: str = "trend",

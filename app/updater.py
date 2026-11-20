@@ -15,7 +15,8 @@
 
 """检查更新：走 GitHub Releases 拿最新版本号，支持镜像兜底与更新包安装。
 
-参考 `lytvpk-master` 的 `internal/app/update.go`（Wails 项目，同样是 GitHub Releases 方案）：
+参考 LytVPK（LaoYutang，GPL-3.0）的 `internal/app/update.go`（Wails 项目，同样是
+GitHub Releases 方案）：<https://github.com/LaoYutang/lytvpk/blob/c8c68819695dfc282c4d059f62e0bf7742befc50/internal/app/update.go#L43-L57>
 
 * 直连 `https://api.github.com/repos/{repo}/releases` 拿 release 列表，**必须带 User-Agent**，
   否则 GitHub 直接 403；额度/限流才是 429，所以不能只靠 HTTP 状态码判断成功。
@@ -28,6 +29,11 @@
 * 版本用「数字段逐段比较」，不依赖字符串排序，避免 `v1.0.10` 与 `v1.0.9` 的坑。
 * 下载更新包后，解压（zip）或直接取 exe，写 `.new` → 当前 exe 改名 `.old` → `.new` 改名回
   当前 exe；任何一步失败都回滚，避免把正在运行的 exe 弄坏。
+
+沿用与改动（回应 issue #1）：`MIRRORS` 这 8 个镜像地址**及其顺序**来自上面链接的
+`update.go`；「从重定向 URL 的 `/tag/` 取版本号」这个做法同样来自它。本项目在此基础上
+把镜像探测改成**并发**（上游是串行，这也是以前「检查更新一直转圈」的原因），并把
+「下载 + 替换 exe + 失败回滚」这一段自己重写了。
 """
 
 from __future__ import annotations
@@ -50,6 +56,8 @@ GITHUB_API = "https://api.github.com/repos/{repo}/releases?per_page=20"
 GITHUB_LATEST = "https://github.com/{repo}/releases/latest"
 
 # 直连 GitHub 不通时的镜像前缀（顺序即优先级）。只做「拿最新 tag」的兜底。
+# 出处：这份列表和顺序取自 LytVPK（LaoYutang，GPL-3.0）的 update.go：
+# https://github.com/LaoYutang/lytvpk/blob/c8c68819695dfc282c4d059f62e0bf7742befc50/internal/app/update.go#L43-L57
 MIRRORS = (
     "https://gh-proxy.com/",
     "https://ghfast.top/",

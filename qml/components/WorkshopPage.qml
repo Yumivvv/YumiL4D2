@@ -67,6 +67,12 @@ Item {
     property bool depsProbing: false     // 只是补前置清单（用户勾了开关，还没点下载）
     property bool probeWantDeps: false   // 当前这次解析要不要前置
     property bool probeFull: false       // 已有全部前置的清单
+    // 当前这次详情解析的**请求序号**（由 core.mods.probeWorkshopFast 返回）。
+    // ★ 必须显式声明：QML 里给未声明的属性赋值不会报错（会被当成动态属性），
+    //   而且 Qt 会刷 `Cannot assign to non-existent property` 把赋值直接丢掉。
+    //   那样 onProbe 的序号校验拿不到值，结果全被当「旧请求」丢弃，界面一直转圈。
+    //   用 -1 当「当前没有有效请求」的哨兵（比 undefined 更好判，也不会被 QML 吞掉）。
+    property int probeSeq: -1
     // 合集成员：先来 60 个，剩下的后端边拉边报（membersDone 为 true 才是全了）
     property var memberItems: []
     property int memberTotal: 0
@@ -90,6 +96,14 @@ Item {
     ]
 
     // 分类表：中文显示名 → Steam 标签（原样传标签最准，别翻译成中文去查）
+    //
+    // 出处：这套「六组分类 + 47 个 Steam 标签」的**分组方式、组内顺序和中文显示名**
+    // 参考了 LytVPK（LaoYutang，GPL-3.0）的 `WORKSHOP_CATEGORIES`：
+    // https://github.com/LaoYutang/lytvpk/blob/c8c68819695dfc282c4d059f62e0bf7742befc50/frontend/src/js/features/workshop/sidebar.js#L12-L90
+    // 标签本身是 Steam 工坊的公开分类，不是谁的私有数据；这里沿用的是「把它们
+    // 分成哪六组、按什么顺序排」这套组织方式。
+    // 本项目的改动（2 处显示名）：「幸存者」→「干员」，「散弹枪」→「霰弹枪」。
+    // 数据是重新用 QML 数组写的，不是移植 JS 代码。
     readonly property var groups: [
         {
             title: "干员",
@@ -266,11 +280,12 @@ Item {
         page.pickedStats = ({});
         page.memberSeen = ({});
         page.memberDupIds = ({});
-        // 记下这次打开的「请求代次」：只有同代次的解析结果才允许渲染
-        page.probeSeq = (page.probeSeq === undefined || page.probeSeq === null)
-                        ? 1 : (Number(page.probeSeq) + 1);
-        // 快速通道：先只解析本体，卡片点开就该立刻有内容可看
-        page.mgr.probeWorkshopFast(item.id);
+        // ★ 序号**从后端拿**：`probeWorkshopFast` 返回这次请求的 seq，
+        //   结果回来时 `res.seq` 是同一个数，比对才有意义。
+        //   上一版这里自己用 `page.probeSeq + 1` 维护，是**另一套计数器**，
+        //   永远不可能和后端的对上 —— 于是每个结果都被当成「旧请求」丢掉，
+        //   界面一直转圈（用户报的「点进去一直加载」）。
+        page.probeSeq = page.mgr ? page.mgr.probeWorkshopFast(item.id) : -1;
         // 统计数字单独补（官方接口才有，慢一点也没关系）
         page.mgr.requestWorkshopStats(item.id);
     }
@@ -356,7 +371,7 @@ Item {
         page.detailStack = [];
         // ★ 作废还在路上的解析结果：否则它回主线程时会把面板又打开
         //   （用户报的「退出后加载好了又弹出来」）。
-        page.probeSeq = undefined;
+        page.probeSeq = -1;
         if (page.mgr && page.mgr.cancelWorkshopProbe)
             page.mgr.cancelWorkshopProbe();
     }
@@ -481,7 +496,16 @@ Item {
             page.stage = "";
             return;
         }
-        if (res && res.seq !== undefined && page.probeSeq !== undefined
+        // ★★ 序号校验：**以 Python 侧的 `_probe_seq` 为唯一权威**。
+        //   上一版这里比的是 QML 自己维护的 `page.probeSeq`，而它是**另一套计数器**：
+        //   QML 从 1 开始自增，Python 也从 0 开始自增，两边永远不可能相等 ——
+        //   于是每次 `onProbe` 都在这里 return，`loadingDetail` 永远变不回 false，
+        //   界面就一直转圈（用户报的「创意工坊点进去一直加载」）。
+        //
+        //   现在改成：打开详情时把「这次请求的 seq」记下来（`page.probeSeq`），
+        //   而它是从 `_start_probe` 的返回值里拿到的**同一个数**，
+        //   所以比对的是同一条流水线，不会错位。
+        if (res && res.seq !== undefined && page.probeSeq >= 0
                 && Number(res.seq) !== Number(page.probeSeq)) {
             // 序号对不上 = 这是一次旧请求的结果（用户已经关窗或换了条目）
             return;

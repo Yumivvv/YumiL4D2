@@ -84,6 +84,19 @@ MAX_TREE_BYTES = 64 * 1024 * 1024
 MAX_FILES = 200000
 
 # 预览图的候选（VPK 里最常见的几种位置）
+#
+# 出处：LytVPK（LaoYutang，GPL-3.0）的 `ExtractPreviewImage` 用两级策略找预览图：
+# 先精确找 `addonimage.jpg`，再按 `previewPatterns` 扫描其它图。其中 3 个
+# **目录型**模式（`materials/vgui/maps/menu/`、`materials/vgui/loadingscreen`、
+# `resource/overviews/`）及其顺序，与下面第 4~6 项一致：
+# https://github.com/LaoYutang/lytvpk/blob/c8c68819695dfc282c4d059f62e0bf7742befc50/internal/parser/parser.go#L312-L368
+# 本项目的改动：
+#   * 上面的 3 个 `addonimage.*` 按**扩展名**列成一个元组，顺序为 jpg → png → jpeg
+#     （上游只精确找 `.jpg`，另外两个扩展名靠第二级的 `".jpg"`/`".png"` 模式兜到）；
+#   * 匹配方式用「目录前缀在内部路径里出现」（`pat in low`），上游同样的写法；
+#   * 上游第二级还混了 `.jpg`/`.jpeg`/`.png` 这类**扩展名**模式，本项目不用它们，
+#     改用 `guess_image_ext_from_name()` 先确认「这是个图片」再套目录前缀。
+# `addoninfo.txt` 的键表（下面 `ADDON_KEYS`）是本项目按实际 VPK 归纳的，不是移植。
 PREVIEW_CANDIDATES = (
     "addonimage.jpg",
     "addonimage.png",
@@ -385,6 +398,12 @@ def read_vpk_meta(path: str, max_image_bytes: int = 4 * 1024 * 1024) -> dict:
                     res["hasBsp"] = True
                 elif low.endswith(".nav"):
                     res["hasNav"] = True
+                # 这三条武器目录、以及「.bsp 判地图 / 否则人物 / 否则武器」的优先级阶梯，
+                # 参考 LytVPK 的 `DetermineVPKType`（LaoYutang，GPL-3.0）：
+                # https://github.com/LaoYutang/lytvpk/blob/c8c68819695dfc282c4d059f62e0bf7742befc50/internal/parser/detector.go#L15-L46
+                # （优先级阶梯本项目的落点在 app/modmanager.py 的 categorize 里。）
+                # 差异：上游扫到 `.bsp` 直接 `break` 定类型，本项目这里只置标志位、
+                # 把整个目录扫完再判 —— 因为同一份结果还要给出人物/武器的全部证据。
                 if ("models/weapons/" in low or "scripts/weapons/" in low
                         or "materials/weapons/" in low):
                     res["hasWeapon"] = True
@@ -441,6 +460,16 @@ def _decode_text(raw: bytes) -> str:
 
 # HUD/界面资源不算「人物」证据 —— 这些目录下几乎必然出现角色名，
 # 拿它们当证据会把界面 MOD 全判成人物 MOD。
+#
+# 出处：这张「界面资源根目录」排除表的**思路和大部分条目**来自 LytVPK
+# （LaoYutang，GPL-3.0，下同）的 `internal/parser/asset_scope.go` 中的 `uiAssetRoots`
+# https://github.com/LaoYutang/lytvpk/blob/c8c68819695dfc282c4d059f62e0bf7742befc50/internal/parser/asset_scope.go#L5-L45
+# 本项目的修改：
+#   * 没有收 `materials/sprites/`（LytVPK 有）—— 实测它会把纯 HUD 的
+#     `materials/sprites/` 贴图也排除掉，对这些 MOD 的判定更保守，留着反而少误判；
+#   * 匹配方式用 `startswith`（前缀），LytVPK 用的是 `strings.Contains`（任意位置包含）；
+#   * 另补了本项目的角色证据目录 `_CHARACTER_SIGNS` 与关键词表 `CHARACTER_KEYWORDS`，
+#     这两张表是本项目自己整理的，不是移植。
 _NON_CHARACTER_DIRS = (
     "materials/vgui/",
     "resource/",

@@ -99,6 +99,25 @@ def main() -> int:
     if page is None or grid is None:
         return 1
 
+    # ★ 工坊列表现在走 Steam 官方 QueryFiles，**必须带用户自己的 API Key**。
+    #   测试机通常没填 key，那时列表会是空的 —— 这不是「滚动坏了」，
+    #   而是「没有数据源」。所以这里直接塞一批假数据进 browseItems，
+    #   让本测试专注验证它真正要验的东西：滚动位置不被重置。
+    #   （「没 key 时给出明确提示」由 round26/test 覆盖，不在这里断言。）
+    if not mgr.browseItems:
+        fake = [{"id": str(3842272870 + i),
+                 "title": "假数据 MOD %d" % i,
+                 "preview": "", "author": "test", "fileType": 0,
+                 "views": 0, "subs": 0, "tags": [], "children": 0}
+                for i in range(50)]
+        mgr._browse_items = fake
+        mgr._browse_thumbs = [""] * len(fake)
+        mgr._browse_total = 500
+        mgr._browse_done = False
+        mgr.browseChanged.emit()
+        spin(400)
+        print("  （没有 API Key，注入 %d 条假数据来验滚动）" % len(fake), flush=True)
+
     waited = 0
     while waited < 30000 and not mgr.browseItems:
         spin(250)
@@ -124,7 +143,22 @@ def main() -> int:
     else:
         print("      （这一页还不够长，A/B 两种情况都验证一下）")
 
-    mgr.browseMore()
+    # ★ 没有 key 时 browseMore() 也拉不到新数据，这里同样用本地追加来模拟
+    #   「后端又送来一页」，专注验证滚动位置不被打回顶部。
+    if not mgr.hasSteamApiKey:
+        extra = [{"id": str(3842290000 + i),
+                  "title": "假数据 MOD 追加 %d" % i,
+                  "preview": "", "author": "test", "fileType": 0,
+                  "views": 0, "subs": 0, "tags": [], "children": 0}
+                 for i in range(50)]
+        mgr._browse_items = list(mgr.browseItems) + extra
+        mgr._browse_thumbs = [""] * len(mgr._browse_items)
+        mgr.browseAppended.emit()
+        mgr.browseChanged.emit()
+        print("  （没有 API Key，本地追加 %d 条模拟下一页）" % len(extra),
+              flush=True)
+    else:
+        mgr.browseMore()
     waited = 0
     while waited < 30000 and len(mgr.browseItems) <= first_count:
         spin(250)

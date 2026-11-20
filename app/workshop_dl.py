@@ -44,6 +44,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Iterable
 
+from . import netclient as NC
 from . import workshop_dns as WDNS
 from .util import Log
 
@@ -315,27 +316,30 @@ def _size_to_bytes(text: str) -> int:
 
 
 # ===========================================================================
-# 详情：优先走国内中转的「解析」接口，官方 API 只当兜底
+# 详情：**直接走 Steam 官方 API**
 # ---------------------------------------------------------------------------
-# 官方 api.steampowered.com 在国内实测经常超时（就是「点开详情一直转圈」的元凶），
-# 而这个中转一次就把标题/体积/预览图/**file_type（2 = 合集）**都给全了，
-# 实测 3 个 ID 0.86 秒。
+# ★ 历史说明（2026-11 变更）：这里原来默认调用第三方运营的中转服务
+#   （`l4d2-workshop-parse.laoyutang.cn` / `l4d2-workshop.laoyutang.cn`），
+#   那是 LytVPK 项目维护者的线上服务，会占用对方的 Cloudflare Workers 与
+#   Steam Web API 额度，对方已在 issue #1 中要求迁移。
+#
+#   现在**只用 Steam 官方接口**，自己的请求自己发、自己的额度自己用：
+#     POST https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/
+#   实测该接口在国内走得通（走 `netclient` 的系统证书后 0.2 秒内返回），
+#   而且一次能给全标题 / 体积 / 预览图 / file_url 直链 / tags，
+#   和原来中转返回的字段基本等价。
+#
+#   与中转的差异只有两处，都已在本文件内自己解决：
+#     · 中转额外给 `file_type`（2 = 合集）—— 官方这句话不给，改问
+#       `GetCollectionDetails` 判定（见 is_collection）。
+#     · 中转额外给 `previews` 多图 —— 官方不给，改从简介里的 [img] 抠
+#       （`_desc_images`，本来就是主力来源）。
 # ===========================================================================
-PARSE_API = "https://l4d2-workshop-parse.laoyutang.cn/"
-# ★ 单个详情接口（参考 lytvpk 的实现，它走的就是这一条）。
-#   国内实测对比（同一个 ID）：
-#     · `-parse` 批量接口     2.15 秒，返回 2020 字节
-#     · `/detail?id=`         0.87 秒，返回 4075 字节（还带 with_previews 多图）
-#     · 备份线路 `/detail`    0.63~0.70 秒
-#   快 2.5 倍、数据多 2 倍，所以**优先用它**，`-parse` 只在批量补历史时用。
-WORKSHOP_DETAIL_API = "https://l4d2-workshop.laoyutang.cn/detail?id={}"
-# 备份线路：主线路挂了/慢了顶上（lytvpk 也是主备双线）
-WORKSHOP_DETAIL_BACKUP = "https://lytvpk-backup.laoyutang.cn/detail?id={}"
 PARSE_BATCH = 100
 
 
 def _int_or_zero(value: object) -> int:
-    """中转那边 file_size 是字符串（也可能带小数点），别让 int() 抛出去。"""
+    """file_size 可能是字符串（也可能带小数点、带单位），别让 int() 抛出去。"""
     try:
         return int(float(str(value or 0).strip() or 0))
     except (TypeError, ValueError):
@@ -421,44 +425,66 @@ def _desc_images(text: object) -> list[str]:
     return out[:12]
 
 
-def _details_one(wid: str, timeout: int = 12) -> dict[str, dict]:
-    """查**单个**工坊详情的快通道（参考 lytvpk：走 `/detail?id=`）。
+def _steam_details(ids: list[str], timeout: int = 20) -> list[dict]:
+    """调 Steam 官方 `GetPublishedFileDetails`，返回 publishedfiledetails 数组。
 
-    实测比批量 `-parse` 接口快 2.5 倍（0.87s vs 2.15s），而且带 `with_previews=1`
-    时多返回作者贴的效果图。主线路挂了立刻退备份线路（lytvpk 也是主备双线）。
+    ★ 这是本项目**唯一**的工坊详情来源：不再经过任何第三方中转。
+      走 `netclient` 的统一 Session（系统证书 + certifi），国内实测可用。
+      一次最多 100 个 ID（Steam 的上限），调用方自己分批。
+    """
+    want = [str(i).strip() for i in ids if str(i or "").strip().isdigit()]
+    if not want:
+        return []
+    payload = {"itemcount": len(want)}
+    for j, w in enumerate(want):
+        payload[f"publishedfileids[{j}]"] = w
+    last_err = ""
+    for attempt in range(3):
+        try:
+            r = NC.post(
+                STEAM_API,
+                data=payload,
+                headers={"User-Agent": UA,
+                         "Content-Type": "application/x-www-form-urlencoded"},
+                timeout=(5, max(8, int(timeout))),
+            )
+            if r.status_code == 200:
+                js = r.json()
+                det = (js.get("response") or {}).get("publishedfiledetails")
+                if isinstance(det, list):
+                    return det
+            last_err = f"HTTP {r.status_code}"
+        except Exception as e:  # noqa: BLE001
+            last_err = type(e).__name__
+        log(f"steam details retry {attempt + 1}/3: {last_err}")
+        if attempt < 2:
+            time.sleep(0.5 + attempt * 0.6)
+    log(f"steam details failed for {len(want)} ids: {last_err}")
+    return []
+
+
+def _details_one(wid: str, timeout: int = 12) -> dict[str, dict]:
+    """查**单个**工坊详情（走 Steam 官方接口）。
 
     返回结构和 `_details_parse` 完全一致，调用方不用区分。
     """
     key = str(wid or "").strip()
     if not key.isdigit():
         return {}
-    for url in (WORKSHOP_DETAIL_API.format(key) + "&with_previews=1",
-                WORKSHOP_DETAIL_BACKUP.format(key) + "&with_previews=1"):
-        req = urllib.request.Request(url, headers={"User-Agent": UA})
-        try:
-            status, raw, _ = _http(req, timeout)
-        except (urllib.error.URLError, TimeoutError, OSError):
-            continue
-        if int(status or 0) != 200:
-            continue
-        try:
-            js = json.loads(raw.decode("utf-8", "replace"))
-        except ValueError:
-            continue
-        det = ((js or {}).get("response") or {}).get("publishedfiledetails") or []
-        if not isinstance(det, list) or not det:
-            continue
-        row = det[0]
-        if isinstance(row, dict):
-            # 复用批量接口那套字段映射：把单条包装成同一形状再走一次
-            out = _details_parse_rows([row])
-            if out:
-                return out
-    return {}
+    rows = _steam_details([key], timeout)
+    return _details_parse_rows(rows) if rows else {}
 
 
 def _details_parse_rows(arr: list) -> dict[str, dict]:
-    """把「publishedfiledetails 数组」映射成我们的统一结构（_details_parse 的公共部分）。"""
+    """把 Steam 的「publishedfiledetails 数组」映射成我们的统一结构。
+
+    ★ 只有 Steam 官方一个来源了，所以这里要自己补齐官方**不给**的两样东西：
+      · `file_type`（2 = 合集）：官方这句话不返回。合集判定改由
+        `fetch_collection()` / `is_collection()` 用 `GetCollectionDetails` 问
+        （那个接口不需要 key，实测可用）。这里先按「有 children」保守填 0，
+        真正点开详情时 `probe()` 会再判一次。
+      · `previews` 多图：官方不给，从简介里的 `[img]` 抠（`_desc_images`）。
+    """
     out: dict[str, dict] = {}
     for f in arr or []:
         if not isinstance(f, dict):
@@ -470,10 +496,14 @@ def _details_parse_rows(arr: list) -> dict[str, dict]:
                 for c in (f.get("children") or []) if isinstance(c, dict)]
         kids = [k for k in kids if k.isdigit()]
         ftype = int(f.get("file_type") or 0)
+        desc_raw = f.get("file_description") or f.get("description") or ""
+        images = _desc_images(desc_raw)
+        own = [str(u) for u in (f.get("previews") or [])
+               if isinstance(u, str) and u.strip()][:12]
+        # 官方不给 previews 时，至少把简介里的图当作多图来源
+        merged_imgs = own or images
         out[wid] = {
             "id": wid,
-            # 合集的 result 常常是 0（中转拿不到合集自身的文件信息），
-            # 但这不影响判断：file_type 会给 2。
             "ok": int(f.get("result") or 0) == 1,
             "title": (f.get("title") or "").strip(),
             "preview": f.get("preview_url") or "",
@@ -481,51 +511,37 @@ def _details_parse_rows(arr: list) -> dict[str, dict]:
             "author": str(f.get("creator") or ""),
             "appId": 0,
             "filename": f.get("filename") or "",
-            # 简介（不同来源叫 file_description 或 description）
-            "desc": _plain_desc(f.get("file_description") or f.get("description")),
-            # ★ 中转直接给了 CDN 上的文件地址（file_url）。对**单文件 .vpk** 来说
-            #   它就是下载直链，省掉「去下载站换直链」那一趟（那一步实测要 2~7 秒
-            #   而且经常连不上）。多文件条目 Steam 只给第一个文件的地址，不能当
-            #   整体下载用 —— 判据见 direct_file_url()。
+            "desc": _plain_desc(desc_raw),
+            # Steam 官方白送的 CDN 文件地址（file_url）。对**单文件 .vpk** 来说
+            # 它就是下载直链，省掉「去下载站换直链」那一趟（那一步实测要 2~7 秒
+            # 而且经常连不上）。多文件条目只给第一个文件的地址，不能当整体下载用
+            # —— 判据见 direct_file_url()。
             "fileUrl": (f.get("file_url") or "").strip(),
             "fileType": ftype,
-            # 只有合集才有「成员数」；单个 MOD 也会带 children（那是它的前置/
-            # 关联项），别把它当成员数，否则卡片上会冒出「合集 1」。
+            # 只有合集才有「成员数」；单个 MOD 的 children 是它的前置/关联项，
+            # 不能当成员数，否则卡片上会冒出「合集 1」。
             "children": len(kids) if ftype == 2 else 0,
             "childrenIds": kids,
-            # 简介里作者自己贴的效果图（BB Code 的 [img]）——详情里可以切换查看。
-            # 快通道额外给的 `previews` 也一起并进来（那是作者上传的多张预览图）。
-            "descImages": _desc_images(
-                f.get("file_description") or f.get("description") or ""),
-            "previews": [str(u) for u in (f.get("previews") or [])
-                         if isinstance(u, str) and u.strip()][:12],
+            "descImages": images,
+            "previews": merged_imgs,
         }
     return out
 
 
 def _details_parse(ids: list[str], timeout: int = 20) -> dict[str, dict]:
-    """一次问一批 ID 的详情（返回结构和 _details_batch 一致）。"""
+    """一次问一批 ID 的详情（走 Steam 官方接口，最多 100 个一批）。"""
     if not ids:
         return {}
-    body = json.dumps([str(i) for i in ids]).encode()
-    req = urllib.request.Request(
-        PARSE_API, data=body,
-        headers={"User-Agent": UA, "Content-Type": "application/json"},
-    )
-    try:
-        status, raw, _ = _http(req, timeout)
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        log(f"parse details failed: {e!r}")
+    rows = _steam_details(ids, timeout)
+    return _details_parse_rows(rows) if rows else {}
+
+
+def _details_parse(ids: list[str], timeout: int = 20) -> dict[str, dict]:
+    """一次问一批 ID 的详情（走 Steam 官方接口，最多 100 个一批）。"""
+    if not ids:
         return {}
-    if int(status or 0) != 200:
-        return {}
-    try:
-        arr = json.loads(raw.decode("utf-8", "replace"))
-    except ValueError:
-        return {}
-    if not isinstance(arr, list):
-        return {}
-    return _details_parse_rows(arr)
+    rows = _steam_details(ids, timeout)
+    return _details_parse_rows(rows) if rows else {}
 
 
 # ===========================================================================
@@ -535,8 +551,7 @@ def fetch_details(wids: Iterable[str] | None = None, wid: str | None = None,
                   timeout: int = 20) -> dict[str, dict]:
     """查一批工坊 ID 的基本信息（标题/体积/作者/预览图 + file_type）。
 
-    顺序：内存缓存 → 国内中转解析接口 → 官方 API。
-    官方那个在国内经常超时，所以只当兜底；两边都失败才算失败。
+    顺序：内存缓存 → **Steam 官方 API**（不再经过任何第三方中转）。
     """
     # 单个 ID 直接传进来（fetch_details("3829533320")）也要认，
     # 否则字符串会被当成一串「字符 ID」一个个去查，结果一个都查不到。
@@ -554,47 +569,35 @@ def fetch_details(wids: Iterable[str] | None = None, wid: str | None = None,
             out[i] = hit
         else:
             missing.append(i)
-    # ---- 1. 先走国内中转（快）----
-    # ★ 数量少时（详情页点开一张卡片就是 1 个）用**单条 /detail 接口**：
-    #   实测 0.87 秒 vs 批量 -parse 的 2.15 秒，快 2.5 倍还多一倍数据。
-    #   数量多时仍是 -parse 批量（一次 100 个），那才是它的强项。
+    if not missing:
+        return out
+
+    # ★ 全部走 Steam 官方 GetPublishedFileDetails：
+    #   数量少（详情页点开一张卡片）时逐个查，串并行都无所谓；
+    #   数量多（列表补封面、合集成员）时按 100 个一批并发。
+    #   以前这里前半段走第三方中转、后半段走官方，两套代码两套行为 ——
+    #   现在只剩一条路，字段和失败语义都统一了。
     parsed: dict[str, dict] = {}
-    single_ids = [i for i in missing if i.isdigit()]
-    if 0 < len(single_ids) <= 6:
-        with ThreadPoolExecutor(max_workers=max(1, len(single_ids))) as pool:
-            for one in pool.map(lambda w: _details_one(w, timeout), single_ids):
+    numeric = [i for i in missing if i.isdigit()]
+    if 0 < len(numeric) <= 6:
+        with ThreadPoolExecutor(max_workers=max(1, len(numeric))) as pool:
+            for one in pool.map(lambda w: _details_one(w, timeout), numeric):
                 if one:
                     parsed.update(one)
-        missing = [i for i in missing if i not in parsed]
-
-    p_batches = [missing[i: i + PARSE_BATCH] for i in range(0, len(missing), PARSE_BATCH)]
-    if p_batches:
-        if len(p_batches) <= 1:
-            for batch_ids in p_batches:
+    else:
+        batches = [numeric[i: i + PARSE_BATCH]
+                   for i in range(0, len(numeric), PARSE_BATCH)]
+        if len(batches) <= 1:
+            for batch_ids in batches:
                 parsed.update(_details_parse(batch_ids, timeout))
         else:
-            with ThreadPoolExecutor(max_workers=max(1, min(4, len(p_batches)))) as pool:
-                for batch in pool.map(lambda b: _details_parse(b, timeout), p_batches):
+            workers = max(1, min(4, len(batches)))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for batch in pool.map(lambda b: _details_parse(b, timeout), batches):
                     parsed.update(batch)
     for k, v in parsed.items():
         out[k] = v
         _cache_put(_DETAILS_CACHE, k, v)
-
-    # ---- 2. 中转没给出来的，再问官方 API（一批 20 个，批次并行）----
-    missing = [i for i in missing if i not in parsed]
-    batches = [missing[i: i + 20] for i in range(0, len(missing), 20)]
-    if len(batches) <= 1:
-        for batch_ids in batches:
-            for k, v in _details_batch(batch_ids, timeout).items():
-                out[k] = v
-                _cache_put(_DETAILS_CACHE, k, v)
-    else:
-        workers = max(1, min(6, len(batches)))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for batch in pool.map(lambda b: _details_batch(b, timeout), batches):
-                for k, v in batch.items():
-                    out[k] = v
-                    _cache_put(_DETAILS_CACHE, k, v)
     return out
 
 
@@ -724,49 +727,57 @@ def fetch_collection(wid: str, timeout: int = 20) -> dict:
 
 
 def _fetch_collection_net(wid: str, timeout: int = 20) -> dict:
-    # 先问国内中转：它一次请求就把 file_type 和 children 都给出来（官方要另外
-    # 打 api.steampowered.com，国内经常超时）
-    p = _details_parse([wid], timeout).get(wid) or {}
-    # ★ children 只有配合 file_type==2 才是「合集成员」：实测单个 MOD
-    #   （file_type=0，3829533320）也会返回 children=[一个 ID]，那是它的前置/
-    #   关联项，不是合集成员 —— 只按 children 判会把普通 MOD 说成合集。
-    if p and int(p.get("fileType") or 0) != 2:
-        return {"isCollection": False, "children": [], "ok": True, "error": ""}
-    kids = [k for k in (p.get("childrenIds") or []) if k.isdigit()]
-    if kids:
-        return {"isCollection": True, "children": kids, "ok": True, "error": ""}
+    """判断是不是合集，并拿子项。
 
+    ★ 顺序很重要（Steam 官方详情接口**不返回 `file_type`**）：
+      现在第一件事就是问 `GetCollectionDetails` —— 它对「不是合集」的条目
+      返回 `result == 9`，对合集返回 `result == 1` + `children`。
+      这是官方给的**唯一可靠判据**，不能靠 `children` 猜（单个 MOD 也会带
+      关联项 children，那样会把普通 MOD 说成合集）。
+    """
     payload = {"collectioncount": 1, "publishedfileids[0]": wid}
     data = urllib.parse.urlencode(payload).encode()
-    req = urllib.request.Request(
-        COLLECTION_API, data=data,
-        headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"},
-    )
-    try:
-        _, body, _ = _http(req, timeout)
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return {"isCollection": False, "children": [], "ok": False,
-                "error": f"查合集失败：{e}"}
-    try:
-        j = json.loads(body.decode("utf-8", "replace"))
-    except ValueError:
-        return {"isCollection": False, "children": [], "ok": False,
-                "error": "合集接口返回的不是 JSON"}
-    details = (j.get("response") or {}).get("collectiondetails") or []
-    for d in details:
-        if str(d.get("publishedfileid") or "") != wid:
-            continue
-        # result == 9 表示「不是合集」，1 表示是合集
-        if d.get("result") != 1:
-            return {"isCollection": False, "children": [], "ok": True, "error": ""}
-        children = [
-            str(c.get("publishedfileid") or "")
-            for c in (d.get("children") or [])
-            if str(c.get("publishedfileid") or "").isdigit()
-        ]
-        return {"isCollection": True, "children": children, "ok": True, "error": ""}
-    # 没返回这条记录：当作「不是合集」，但不算失败
-    return {"isCollection": False, "children": [], "ok": True, "error": ""}
+    last_err = ""
+    for attempt in range(2):
+        try:
+            r = NC.post(
+                COLLECTION_API,
+                data=data,
+                headers={"User-Agent": UA,
+                         "Content-Type": "application/x-www-form-urlencoded"},
+                timeout=(5, max(8, int(timeout))),
+            )
+            if r.status_code != 200:
+                last_err = f"HTTP {r.status_code}"
+            else:
+                j = r.json()
+                details = (j.get("response") or {}).get("collectiondetails") or []
+                for d in details:
+                    if str(d.get("publishedfileid") or "") != wid:
+                        continue
+                    # result == 9 表示「不是合集」，1 表示是合集
+                    rc = int(d.get("result") or 0)
+                    if rc == 9:
+                        return {"isCollection": False, "children": [],
+                                "ok": True, "error": ""}
+                    if rc != 1:
+                        return {"isCollection": False, "children": [],
+                                "ok": True, "error": ""}
+                    kids = [str(c.get("publishedfileid") or "")
+                            for c in (d.get("children") or [])
+                            if isinstance(c, dict)]
+                    kids = [k for k in kids if k.isdigit()]
+                    return {"isCollection": True, "children": kids,
+                            "ok": True, "error": ""}
+                # 没有对应条目：当作「不是合集」，不算失败
+                return {"isCollection": False, "children": [], "ok": True,
+                        "error": ""}
+        except Exception as e:  # noqa: BLE001
+            last_err = type(e).__name__
+        if attempt < 1:
+            time.sleep(0.4)
+    return {"isCollection": False, "children": [], "ok": False,
+            "error": f"查合集失败：{last_err}"}
 
 
 # ===========================================================================

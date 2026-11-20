@@ -40,6 +40,7 @@ from typing import Callable, Iterable
 
 import requests
 
+from . import netclient as NC
 from .util import DATA_DIR, Log
 
 log = Log("mods.log")
@@ -53,9 +54,12 @@ ARCHIVE_EXTS = (".zip",)
 DISABLED_SUFFIX = ".vpk.disabled"
 WORKSHOP_API = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 WORKSHOP_PAGE = "https://steamcommunity.com/sharedfiles/filedetails/?id={}"
-# 项目自带的公开只读中转站：返回结构和官方 API 等价，但国内实测 1.5 秒 vs 官方 30 秒+。
-# 列表接口也在用同一个站的另一个路径（见 workshop_net.WORKSHOP_LIST_BASE）。
-WORKSHOP_RELAY_DETAIL = "https://l4d2-workshop.laoyutang.cn/detail?id={}"
+# 合集成员：官方 GetCollectionDetails（不需要 key，实测可用）
+WORKSHOP_COLLECTION_API = (
+    "https://api.steampowered.com/ISteamRemoteStorage/GetCollectionDetails/v1/")
+# ★ 这里原本有一个第三方中转地址（l4d2-workshop.laoyutang.cn/detail?id=），
+#   那是 LytVPK 维护者的线上服务，已在 issue #1 中要求迁移，**已移除**。
+#   现在所有工坊数据都直接问 Steam 官方接口。
 CACHE_DIR = os.path.join(DATA_DIR, "modcache")
 META_PATH = os.path.join(DATA_DIR, "modmeta.json")
 # 作者 Steam 昵称缓存（SteamID → 昵称）
@@ -652,63 +656,35 @@ class WorkshopClient:
     def _query_batch(ids: list[str]) -> list[dict]:
         """查一批工坊 ID，返回 publishedfiledetails 数组。
 
-        ★ 三级来源，从快到慢（**国内实测**，用户报的「查工坊 ID 半天没封面、一直失败」）：
+        ★ 只走 **Steam 官方** `ISteamRemoteStorage/GetPublishedFileDetails`。
 
-          1. **项目自带的中转站** `l4d2-workshop.laoyutang.cn/detail?id=`
-             —— 单个 ID 约 **1.5 秒**，返回字段和官方 API **完全等价**
-             （title / preview_url / previews / description / file_size / tags …），
-             而且不按批、逐个查也不会被限流。这是首选。
-          2. **Steam 官方** `ISteamRemoteStorage/GetPublishedFileDetails`
-             —— 能一次查 20 个，但国内实测**单次要 30 秒以上**（能连上但很慢），
-             所以只在中转站失败时兜底，且超时压到 (5,12) 秒。
-          3. 都不行就返回空，让上层记一笔、下次再试。
+        历史说明（2026-11 变更）：这里原来优先调用第三方运营的中转服务
+        （`l4d2-workshop.laoyutang.cn`），那是 LytVPK 维护者的线上服务，
+        会占用对方的 Cloudflare Workers 与 Steam Web API 额度，
+        对方已在 issue #1 中要求迁移 —— 现在**不再调用任何第三方中转**。
 
-        以前只有第 2 条，而且重试 4 次 × (10,30) 秒 —— 最坏 33 秒才失败，
-        列表里就一直空着封面。
+        实测官方接口在国内可用（走 `netclient` 的系统证书，0.2 秒内返回），
+        所以也不再需要「先中转、失败再官方」那套兜底。
         """
-        out: list[dict] = []
-        missing: list[str] = []
-
-        # ---- 1) 中转站（逐个查，快且字段全）
-        for wid in ids:
-            row = WorkshopClient._query_relay(wid)
-            if row:
-                out.append(row)
-            else:
-                missing.append(wid)
-
-        # ---- 2) 官方 API 兜底（按 20 个一批）
-        for i in range(0, len(missing), 20):
-            batch = missing[i:i + 20]
-            out.extend(WorkshopClient._query_official(batch))
-        return out
+        return WorkshopClient._query_official(ids)
 
     @staticmethod
     def _query_relay(wid: str) -> dict:
-        """从中转站查单个工坊条目；失败返回空 dict。"""
-        key = str(wid or "").strip()
-        if not key.isdigit():
-            return {}
-        try:
-            r = requests.get(
-                WORKSHOP_RELAY_DETAIL.format(key),
-                headers={"User-Agent": UA},
-                timeout=(4, 10),
-            )
-            if r.status_code != 200:
-                return {}
-            js = r.json()
-        except Exception:  # noqa: BLE001 —— 中转站挂了就走官方兜底，不吵
-            return {}
-        det = ((js or {}).get("response") or {}).get("publishedfiledetails") or []
-        if not det or not isinstance(det, list):
-            return {}
-        row = det[0]
-        return row if isinstance(row, dict) else {}
+        """（已停用）原第三方中转查询，保留函数名只为兼容老代码的 hasattr 检查。
+
+        ★ 现在**永远返回空**，所有请求都走 `_query_official`。
+          保留它是因为外部脚本 / 测试可能引用这个名字，
+          直接删掉会变成 AttributeError。
+        """
+        return {}
 
     @staticmethod
     def _query_official(ids: list[str]) -> list[dict]:
-        """官方 GetPublishedFileDetails（POST、按批），带短超时重试。"""
+        """官方 GetPublishedFileDetails（POST、按批），带短超时重试。
+
+        走 `netclient` 的统一 Session：系统证书 + certifi，
+        否则国内装了加速工具时这里会 SSLCertVerificationError 直接失败。
+        """
         payload = {"itemcount": len(ids)}
         for j, wid in enumerate(ids):
             payload[f"publishedfileids[{j}]"] = wid
@@ -716,7 +692,7 @@ class WorkshopClient:
         last_err = ""
         for attempt in range(3):
             try:
-                r = requests.post(
+                r = NC.post(
                     WORKSHOP_API,
                     data=payload,
                     headers={

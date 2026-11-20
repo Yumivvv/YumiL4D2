@@ -85,8 +85,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 加速管「连哪台机器」，DNS 管「用谁把域名解析成 IP」。
     #   workshop_dns_mode   dnspod=腾讯 / alidns=阿里 / custom=自定义 / system=系统
     #   workshop_dns_custom 自定义 DNS 地址（IPv4 或 IPv6）
+    # 工坊 DNS：和上面的「网络加速」是**两件独立的事**——
     "workshop_dns_mode": "dnspod",
     "workshop_dns_custom": "",
+    # Steam Web API Key（用户自己的）。
+    # ★ 只有「工坊列表 / 搜索」需要它：Steam 的 QueryFiles 接口强制要 key，
+    #   不带 key 直接 403。详情、下载、合集展开都不需要。
+    #   存在本地 config.json，不进仓库、不上传。
+    "steam_api_key": "",
     # 创意工坊「稍后看」：只存工坊 ID 列表，详情按需再拉
     "workshop_later": [],
     # 收藏的服务器：只存地址和备注名，实时状态（人数/地图/模式）查询时再生

@@ -215,7 +215,12 @@ def main() -> int:
     from app.modmanager import ModManager                   # noqa: PLC0415
     mm2 = ModManager(core)
     check("重新构造能读回排序", mm2.sortMode == 5, mm2.sortMode)
-    check("重新构造能读回筛选", mm2.statusFilter == 3, mm2.statusFilter)
+    # ★ 状态筛选**有意不跨重启保留**：上次停在「我的收藏」再点进来会像
+    #   「自动跳过去了」，列表还常常是空的（用户报过）。
+    #   现在初始化就把这类临时筛选复位，所以这里断言的是「复位到全部」，
+    #   而不是「读回 3」。磁盘上仍然记着 3（上一行已验证），只是启动时不采用。
+    check("状态筛选有意不复位旧值（启动即回到全部）",
+          mm2.statusFilter == 0, mm2.statusFilter)
     mm.resetFilters()
     mm.setSortMode(0)
 

@@ -167,12 +167,21 @@ check("标题里写了合集名数量", '"，含 "' in QML_MAIN)
 # ============================================ 5. 工坊查询加速
 print()
 print("[5] 工坊详情查询加速与失败重试")
-check("有中转站常量", "WORKSHOP_RELAY_DETAIL" in PY_M)
-check("中转站走 /detail?id=", '/detail?id={}' in PY_M)
-check("有 _query_relay", "def _query_relay" in PY_M)
-check("有 _query_official", "def _query_official" in PY_M)
-check("_query_batch 先走中转站",
-      PY_M.index("_query_relay(wid)") < PY_M.index("_query_official(batch)"))
+# ★ 2026-11 迁移：第三方中转已全部移除（issue #1），现在只走 Steam 官方。
+check("中转常量已移除", "WORKSHOP_RELAY_DETAIL" not in PY_M)
+check("代码里没有第三方中转地址残留（注释除外）",
+      # 只查「真的会发请求的行」：以字符串常量赋值或调用形式出现的域名
+      not any(("laoyutang" in ln and ("=" in ln or "(" in ln))
+              and not ln.strip().startswith("#")
+              for ln in PY_M.splitlines()),
+      [ln.strip()[:50] for ln in PY_M.splitlines()
+       if "laoyutang" in ln and not ln.strip().startswith("#")][:2])
+check("有 _query_official（唯一的详情来源）",
+      "def _query_official" in PY_M)
+check("_query_batch 直接走官方",
+      "return WorkshopClient._query_official(ids)" in PY_M)
+check("有合集判定接口（官方 file_type 不给，改问 CollectionDetails）",
+      "WORKSHOP_COLLECTION_API" in PY_M)
 check("官方 API 超时压到 (5,12)",
       "timeout=(5, 12)" in PY_M)
 check("官方 API 只重试 3 次", "range(3)" in PY_M)

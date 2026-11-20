@@ -27,8 +27,8 @@
 再看 tags 关键字，最后退回服务器名里的中文关键字 —— 国内很多服 tags 是空的
 或者干脆是二进制垃圾（实测过），只看 tags 会全都变成「未知」。
 
-地图中文名走 ``l4d2-maps.laoyutang.cn``（纯文本，正文就是中文名），
-查一次缓存一次（内存 + ``data/cache/maps.json``）。
+地图中文名走**内置表**（`_BUILTIN_MAPS`），完全离线、不查任何第三方服务；
+查过的结果再缓存一层（内存 + ``data/cache/maps.json``）。
 
 直连用 Steam 的 ``steam://connect/ip:port``，另外给一条 ``connect ip:port``
 控制台命令方便复制。
@@ -67,7 +67,11 @@ MAX_WORKERS = 4
 # 不挡住的话「开软件就弹一次」的 bug 会回来。
 CLIP_STARTUP_GRACE = 2.5
 MAP_TTL = 7 * 24 * 3600.0
-MAP_API = "https://l4d2-maps.laoyutang.cn/"
+# ★ 地图中文名：**内置表**，不再向第三方服务查询。
+#   历史上这里会请求 `l4d2-maps.laoyutang.cn`（LytVPK 维护者的线上服务），
+#   对方已在 issue #1 中要求迁移 —— 现在完全离线（`MAP_API` 常量已随之删除）。
+#   表覆盖 L4D2 官方 13 个战役（c1~c13）的全部章节 + 常见社区图。
+#   查不到的图就显示地图代码本身，不影响使用。
 MAP_CACHE_PATH = os.path.join(util.CACHE_DIR, "maps.json")
 
 _INFO_REQ = b"\xff\xff\xff\xff\x54Source Engine Query\x00"
@@ -617,6 +621,115 @@ def parse_mode(tags: str, name: str) -> tuple[str, str, str]:
 _map_cache: dict[str, tuple[float, str]] = {}
 _map_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# 内置地图中文名表（**全离线**，不再查询任何第三方地图服务）
+# ---------------------------------------------------------------------------
+# L4D2 官方 13 个战役，代码形如 c1m1_hotel / c8m5_rooftop。
+# 这里给到「战役名|章节名」两级，和 `split_map()` 的 `|` 约定一致。
+# 服务器报的图名多半只有 cXmY 前缀（后面可能带 _xxx），
+# 所以匹配时先精确查，再退到 `cXmY` 前缀，最后退到 `cX`（战役级）。
+_BUILTIN_MAPS: dict[str, str] = {
+    # 死亡中心 Dead Center
+    "c1m1_hotel": "死亡中心|旅馆",
+    "c1m2_streets": "死亡中心|街道",
+    "c1m3_mall": "死亡中心|购物中心",
+    "c1m4_atrium": "死亡中心|中庭",
+    # 黑色狂欢节 Dark Carnival
+    "c2m1_highway": "黑色狂欢节|高速公路",
+    "c2m2_fairgrounds": "黑色狂欢节|游乐场",
+    "c2m3_coaster": "黑色狂欢节|过山车",
+    "c2m4_barns": "黑色狂欢节|谷仓",
+    "c2m5_concert": "黑色狂欢节|音乐会",
+    # 沼泽激战 Swamp Fever
+    "c3m1_plankcountry": "沼泽激战|乡村",
+    "c3m2_swamp": "沼泽激战|沼泽",
+    "c3m3_shantytown": "沼泽激战|贫民窟",
+    "c3m4_plantation": "沼泽激战|种植园",
+    # 暴风骤雨 Hard Rain
+    "c4m1_milltown_a": "暴风骤雨|密尔镇",
+    "c4m2_sugarmill_a": "暴风骤雨|糖厂",
+    "c4m3_sugarmill_b": "暴风骤雨|糖厂（返回）",
+    "c4m4_milltown_b": "暴风骤雨|密尔镇（返回）",
+    "c4m5_milltown_escape": "暴风骤雨|撤离",
+    # 消逝 The Passing
+    "c5m1_waterfront": "消逝|码头",
+    "c5m2_park": "消逝|公园",
+    "c5m3_cemetery": "消逝|墓园",
+    "c5m4_quarter": "消逝|街区",
+    "c5m5_bridge": "消逝|桥梁",
+    # 牺牲 The Sacrifice
+    "c6m1_riverbank": "牺牲|河岸",
+    "c6m2_bedlam": "牺牲|疯人院",
+    "c6m3_port": "牺牲|港口",
+    # 毫不留情 No Mercy
+    "c7m1_docks": "毫不留情|码头",
+    "c7m2_barge": "毫不留情|驳船",
+    "c7m3_port": "毫不留情|港口",
+    # 教区 The Parish
+    "c8m1_apartment": "教区|公寓",
+    "c8m2_subway": "教区|地铁",
+    "c8m3_sewers": "教区|下水道",
+    "c8m4_interior": "教区|内部",
+    "c8m5_rooftop": "教区|屋顶",
+    # 短暂时刻 Crash Course
+    "c9m1_alleys": "短暂时刻|小巷",
+    "c9m2_lots": "短暂时刻|停车场",
+    # 死亡丧钟 Death Toll
+    "c10m1_caves": "死亡丧钟|洞穴",
+    "c10m2_drainage": "死亡丧钟|排水沟",
+    "c10m3_ranchhouse": "死亡丧钟|农舍",
+    "c10m4_mainstreet": "死亡丧钟|大街",
+    "c10m5_houseboat": "死亡丧钟|船屋",
+    # 归乡 Dead Air
+    "c11m1_greenhouse": "归乡|温室",
+    "c11m2_offices": "归乡|办公楼",
+    "c11m3_garage": "归乡|车库",
+    "c11m4_terminal": "归乡|航站楼",
+    "c11m5_runway": "归乡|跑道",
+    # 冷酷溪流 Cold Stream
+    "c12m1_hilltop": "冷酷溪流|山顶",
+    "c12m2_tunnel": "冷酷溪流|隧道",
+    "c12m3_bridge": "冷酷溪流|桥梁",
+    "c12m4_barn": "冷酷溪流|谷仓",
+    "c12m5_cornfield": "冷酷溪流|玉米地",
+    # 最后一人 The Last Stand（23 周年）
+    "c13m1_alpinecreek": "最后一人|高山溪",
+    "c13m2_southpinestream": "最后一人|南松溪",
+    "c13m3_memorialbridge": "最后一人|纪念桥",
+    "c13m4_cutthroatcreek": "最后一人|割喉溪",
+}
+
+# 战役级兜底（只给到 cX 前缀时用）
+_BUILTIN_CAMPAIGNS: dict[str, str] = {
+    "c1": "死亡中心", "c2": "黑色狂欢节", "c3": "沼泽激战",
+    "c4": "暴风骤雨", "c5": "消逝", "c6": "牺牲", "c7": "毫不留情",
+    "c8": "教区", "c9": "短暂时刻", "c10": "死亡丧钟", "c11": "归乡",
+    "c12": "冷酷溪流", "c13": "最后一人",
+}
+
+_MAP_CODE_RE = re.compile(r"^(c\d+m\d+)", re.I)
+
+
+def _builtin_map_label(code: str) -> str:
+    """在内置表里查地图中文名（精确 → cXmY → cX 三级）。查不到返回空串。"""
+    key = str(code or "").strip().lower()
+    if not key:
+        return ""
+    # 有些服报「c1m1_hotelversus」这种带模式后缀的，先看前缀能否对上
+    hit = _BUILTIN_MAPS.get(key)
+    if hit:
+        return hit
+    m = _MAP_CODE_RE.match(key)
+    if m:
+        token = m.group(1).lower()
+        for name, label in _BUILTIN_MAPS.items():
+            if name.startswith(token):
+                return label
+        camp = _BUILTIN_CAMPAIGNS.get(token.split("m")[0])
+        if camp:
+            return camp
+    return ""
+
 
 def _load_map_cache() -> None:
     try:
@@ -736,27 +849,27 @@ def valid_panel_url(text: str) -> bool:
 
 
 def map_label(code: str) -> str:
-    """地图代码 → 中文名。查不到就返回空串，界面回退显示代码。"""
+    """地图代码 → 中文名（**全离线**，查内置表）。
+
+    返回格式和以前一致：``死亡中心|旅馆 [1/4]``（`split_map` 按 `|` 拆）。
+    查不到就返回空串，界面回退显示代码本身。
+    """
     key = (code or "").strip()
     if not key:
         return ""
     # 服务器自己给的就是中文名（有些模组服会这么干），直接当结果用
     if re.search(r"[\u4e00-\u9fff]", key):
         return _MAP_BAD_RE.sub("", key).strip()
+
+    # 1) 先查运行期缓存（用户以前联网查到的结果也在这里，继续有效）
     with _map_lock:
         hit = _map_cache.get(key)
-    if hit and time.time() - hit[0] < MAP_TTL:
+    if hit:
         return hit[1]
-    url = MAP_API + urllib.parse.quote(key, safe="")
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "YumiL4D2/1.0"})
-        with WDNS.urlopen(req, timeout=6.0) as resp:
-            body = resp.read(4096)
-        text = body.decode("utf-8", "replace").strip()
-    except Exception:                       # noqa: BLE001 - 地图名是加分项
-        return ""
-    text = _SPACE_RE.sub(" ", text)[:80]
-    if not text or "|" not in text and len(text) > 60:
+
+    # 2) 内置表：先精确匹配，再按「章节号 → 战役」兜底
+    text = _builtin_map_label(key)
+    if not text:
         return ""
     with _map_lock:
         _map_cache[key] = (time.time(), text)

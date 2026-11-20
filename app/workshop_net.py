@@ -46,6 +46,7 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Iterable
 
+from . import netclient as NC
 from . import workshop_dns as WDNS
 from .util import Log
 
@@ -63,6 +64,13 @@ STEAM_IMAGE_HOST = "images.steamusercontent.com"
 
 # 内置的 Steam CDN IP（就近的几个 Akamai/Valve 节点）。
 # 这些只在本程序内部用，界面上永远只显示节点地名（见 region_for_ip）。
+#
+# 出处：这 6 个兜底 IP 及其**排列顺序**取自 LytVPK（LaoYutang，GPL-3.0）的
+# `defaultSteamCDNIPs`：
+# https://github.com/LaoYutang/lytvpk/blob/c8c68819695dfc282c4d059f62e0bf7742befc50/internal/network/ip_selector.go#L29-L37
+# 本项目的修改：LytVPK 用这份表在远端节点池不可用时兜底；本项目同样只在
+# `CDN_POOL_URL` 为空（不再请求任何第三方节点池）时用它，另加了下面的
+# `IP_REGION_HINTS` 地名表（本项目自己整理）与 TCP/TLS/HEAD 测速实现。
 BUILTIN_CDN_IPS = (
     "23.59.72.59",
     "23.59.72.42",
@@ -102,7 +110,15 @@ _EN_REGION_CN = {
 }
 
 # 远端 CDN 节点池（带地名分类）。拿不到就用 BUILTIN_CDN_IPS 兜底。
-CDN_POOL_URL = "https://lytvpk-get-ips.laoyutang.cn/"
+#
+# ★ 历史说明（2026-11 变更）：这里原来指向第三方运营的节点池
+#   （`lytvpk-get-ips.laoyutang.cn`），那是 LytVPK 维护者的线上服务，
+#   对方已在 issue #1 中要求迁移 —— **已移除**。
+#   现在候选节点只有两个来源：
+#     1. 内置的 BUILTIN_CDN_IPS（就是上面那几个常用 Akamai 节点）
+#     2. 用户自己在设置里填的节点（config 的 workshop_cdn_ip）
+#   不再向任何第三方要节点列表。想扩节点就在设置里手动指定。
+CDN_POOL_URL = ""
 
 # 测速用的探针路径（Steam 的一张公开小图，返回很快）
 _PROBE_PATH = "/ugc/11950912305938203132/6B59A7A5421AAECA12356E625388AEE4DB569E04/"
@@ -196,52 +212,47 @@ def region_for_ip(ip: str) -> str:
 
 
 def fetch_cdn_nodes(timeout: float = 8.0) -> list[dict]:
-    """拉一份 CDN 节点池，每项 {ip, region}。
+    """拿一份 CDN 节点列表，每项 {ip, region}。
 
-    远端给的是带地名分类的 entries（例如 steam官方-首尔），
-    拿不到就退回内置 IP + 本地地名表 —— 调用方永远能拿到非空列表。
+    ★ 现在**没有远端节点池**（原第三方池已在 issue #1 后移除），
+      候选就是内置的 BUILTIN_CDN_IPS + 本地地名表。
+      想用别的节点请在设置里「手动指定 IP」，不会向任何第三方要列表。
     """
     nodes: list[dict] = []
     seen: set[str] = set()
-    try:
-        q = urllib.parse.urlencode({
-            "domain": STEAM_CDN_HOST, "format": "entries",
-        })
-        req = urllib.request.Request(
-            CDN_POOL_URL + "?" + q, headers={"User-Agent": UA})
-        with WDNS.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                raise ValueError(f"节点池返回 HTTP {resp.status}")
-            raw = json.loads(resp.read().decode("utf-8", "replace"))
-        if isinstance(raw, list):
-            for entry in raw:
-                if not isinstance(entry, dict):
-                    continue
-                ip = str(entry.get("ip") or "").strip()
-                if not normalize_ip_list([ip]):
-                    continue
-                if ip in seen:
-                    continue
-                # 优先用本地地名表（给的是城市：首尔/东京…）；
-                # 远端分类只到国家（steam官方-韩国），当地名兜底。
-                known = region_for_ip(ip)
-                region = known if known and known != "未知地区" \
-                    else (_region_from_category(entry.get("category")) or known)
-                seen.add(ip)
-                nodes.append({"ip": ip, "region": region})
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        nodes = []
+    if CDN_POOL_URL:
+        # 留个口子：以后真有自建节点池，把 URL 填上这段就能用
+        try:
+            q = urllib.parse.urlencode({
+                "domain": STEAM_CDN_HOST, "format": "entries",
+            })
+            req = urllib.request.Request(
+                CDN_POOL_URL + "?" + q, headers={"User-Agent": UA})
+            with WDNS.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    raw = json.loads(resp.read().decode("utf-8", "replace"))
+                    if isinstance(raw, list):
+                        for entry in raw:
+                            if not isinstance(entry, dict):
+                                continue
+                            ip = str(entry.get("ip") or "").strip()
+                            if not normalize_ip_list([ip]) or ip in seen:
+                                continue
+                            known = region_for_ip(ip)
+                            region = known if known and known != "未知地区" \
+                                else (_region_from_category(
+                                    entry.get("category")) or known)
+                            seen.add(ip)
+                            nodes.append({"ip": ip, "region": region})
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            pass
 
-    # 远端池不一定包含内置的那几个（比如大阪节点），补上，选择更多
+    # 内置节点永远补上（远端池就算有也常常漏掉大阪这类）
     for ip in BUILTIN_CDN_IPS:
         if ip in seen:
             continue
         seen.add(ip)
         nodes.append({"ip": ip, "region": region_for_ip(ip)})
-
-    if not nodes:
-        for ip in BUILTIN_CDN_IPS:
-            nodes.append({"ip": ip, "region": region_for_ip(ip)})
     return nodes
 
 
@@ -853,16 +864,30 @@ def _translate_chunk_transmart(chunk: str, target: str, timeout: float,
 # ===========================================================================
 # 创意工坊「浏览」（列表 / 搜索 / 排序 / 翻页）
 # ===========================================================================
-# 为什么列表要单独走一个代理：
-#   Steam 官方的列表接口 `IPublishedFileService/QueryFiles` **必须用 publisher key**，
-#   而且官方文档明确写了它「不能在客户端直接调用」；工坊网页 steamcommunity.com
-#   在国内又经常被重置（实测 WinError 10054）。
-#   所以列表走一个公开的只读中转（社区工具常见做法），
-#   详情仍然走官方 GetPublishedFileDetails（不需要 key，国内能通）。
-WORKSHOP_LIST_BASE = "https://l4d2-workshop.laoyutang.cn"
+# ★ 历史说明（2026-11 变更）：这里原来调用第三方运营的中转
+#   （`l4d2-workshop.laoyutang.cn/list`），那是 LytVPK 维护者的线上服务，
+#   会占用对方的 Cloudflare Workers 与 Steam Web API 额度，
+#   对方已在 issue #1 中要求迁移 —— 现在**不再调用任何第三方中转**。
+#
+# 现在直接用 Steam 官方的 `IPublishedFileService/QueryFiles`。
+# ★ 这个接口**必须带 Steam Web API key**（不带 key 实测返回 403
+#   "Access is denied. Please verify your key= parameter"）。
+#   key 由用户在「设置 → 网络」里自己填，只存本地 config.json，
+#   绝不写死进源码 —— 用的是使用者自己的额度。
+#   没填 key 时列表页会明确提示，而不是悄悄调用别人的服务兜底。
+WORKSHOP_QUERY_API = (
+    "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/")
 
 # 排序：trend=热门 / recent=最新 / top=最多订阅
 SORT_MODES = ("trend", "recent", "top")
+# 映射到 Steam QueryFiles 的排序枚举：
+#   0 = Trending（热度）  1 = MostRecent（最新）  3 = TopRated（最高评分）
+_STEAM_SORT = {"trend": 0, "recent": 1, "top": 3}
+
+# 没配 key 时的统一提示（界面直接显示这句话）
+NO_KEY_ERROR = (
+    "列表搜索需要你自己的 Steam Web API Key（设置 → 网络 → Steam API Key）。"
+    "详情和下载不需要 key，可以照常使用")
 
 # 浏览对象：mod=单件（含地图/音效等所有普通物品）/ collection=合集
 BROWSE_KINDS = ("mod", "collection")
@@ -921,12 +946,15 @@ def normalize_tags(value: object) -> list[str]:
 
 def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
                         tags: object = None, kind: str = "mod",
-                        timeout: float = 25.0) -> dict:
+                        timeout: float = 25.0, api_key: str = "") -> dict:
     """拉一页工坊列表（L4D2，appid=550），带 10 分钟内存缓存。
 
     缓存的意义：切分类、点「稍后看」再点回来、来回滚列表时不该再等一次网络。
-    返回 {"ok", "items": [...], "total", "page", "error", "cached"}。
+    返回 {"ok", "items": [...], "total", "page", "error", "cached", "needKey"}。
     items 每项：{id, title, preview, author, fileType, views, subs, tags, children}
+
+    ★ `api_key` 是使用者自己的 Steam Web API Key（Steam 的列表接口强制要求）。
+      没传 key 时返回 `needKey: True` + 明确提示，不会去调任何第三方中转。
     """
     tag_key = tuple(normalize_tags(tags))
     key = (str(query or "").strip(), normalize_page(page),
@@ -939,9 +967,11 @@ def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
                 "items": [dict(x) for x in res.get("items", [])],
                 "total": int(res.get("total") or 0),
                 "page": int(res.get("page") or 1),
-                "error": str(res.get("error") or ""), "cached": True}
+                "error": str(res.get("error") or ""), "cached": True,
+                "needKey": False}
 
-    res = _fetch_workshop_list_net(query, page, sort, list(tag_key), kind, timeout)
+    res = _fetch_workshop_list_net(query, page, sort, list(tag_key), kind,
+                                   timeout, api_key)
     if res.get("ok"):
         with _LIST_LOCK:
             _LIST_CACHE[key] = (time.time(), {
@@ -965,39 +995,71 @@ def clear_list_cache() -> None:
 
 def _fetch_workshop_list_net(query: str = "", page: int = 1, sort: str = "trend",
                              tags: object = None, kind: str = "mod",
-                             timeout: float = 25.0) -> dict:
-    """真正去问一次列表接口（没有缓存）。"""
-    params = urllib.parse.urlencode({
-        "page": normalize_page(page),
-        "q": str(query or "").strip(),
-        "sort": normalize_sort(sort),
-        "filetype": _FILE_TYPE_OF_KIND[normalize_kind(kind)],
-    })
+                             timeout: float = 25.0,
+                             api_key: str = "") -> dict:
+    """真正去问一次列表接口（没有缓存）—— 走 Steam 官方 QueryFiles。
+
+    ★ 需要调用者自己的 Steam Web API Key（`api_key` 参数）。
+      没有 key 时**不发起请求**、也不回退到任何第三方服务，
+      直接返回一句明确的提示（`NO_KEY_ERROR`），界面照这句话显示。
+    """
+    key = str(api_key or "").strip()
+    if not key:
+        return {"ok": False, "items": [], "total": 0, "page": page,
+                "error": NO_KEY_ERROR, "needKey": True}
+
     tag_list = normalize_tags(tags)
+    params = {
+        "key": key,
+        "query_type": 1,                      # 1 = ranked by vote
+        "page": normalize_page(page) - 1,      # ★ Steam 的页码从 0 开始
+        "numperpage": 30,
+        "creator_appid": 550,
+        "appid": 550,
+        # feed 决定「单件 / 合集」：0 = 普通物品，1 = 合集
+        "filetype": _FILE_TYPE_OF_KIND[normalize_kind(kind)],
+        "return_tags": "true",
+        "return_previews": "true",
+        "return_short_description": "true",
+        "return_metadata": "true",
+        "strip_description_bbcode": "false",
+        # 排序枚举：0 热度 / 1 最新 / 3 最高评分
+        "days": 7,
+    }
+    q = str(query or "").strip()
+    if q:
+        params["search_text"] = q
     if tag_list:
-        params += "&" + urllib.parse.urlencode({"tags": ",".join(tag_list)})
-    url = WORKSHOP_LIST_BASE + "/list?" + params
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+        params["requiredtags"] = ",".join(tag_list)
+    # Steam 的排序既可以用 query_type，也可以用 days+sortmethod；这里用前者
+    params["query_type"] = _STEAM_SORT.get(normalize_sort(sort), 0)
+
     try:
-        with WDNS.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                return {"ok": False, "items": [], "total": 0, "page": page,
-                        "error": f"列表接口 HTTP {resp.status}"}
-            body = resp.read()
-    except urllib.error.HTTPError as e:
+        resp = NC.get(WORKSHOP_QUERY_API, params=params,
+                      headers={"User-Agent": UA}, timeout=(5, max(8, int(timeout))))
+    except Exception as e:  # noqa: BLE001
         return {"ok": False, "items": [], "total": 0, "page": page,
-                "error": f"列表接口 HTTP {e.code}"}
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+                "error": f"连不上 Steam 列表接口（{type(e).__name__}）"}
+
+    status = int(getattr(resp, "status_code", 0) or 0)
+    if status == 403:
+        # key 无效 / 没有权限
         return {"ok": False, "items": [], "total": 0, "page": page,
-                "error": f"连不上列表接口（{type(e).__name__}）"}
+                "error": "Steam 拒绝了请求：API Key 无效或没有权限，"
+                         "请在设置 → 网络里换一个自己的 key",
+                "needKey": True}
+    if status != 200:
+        return {"ok": False, "items": [], "total": 0, "page": page,
+                "error": f"Steam 列表接口 HTTP {status}"}
     try:
-        j = json.loads(body.decode("utf-8", "replace"))
+        j = resp.json()
     except ValueError:
         return {"ok": False, "items": [], "total": 0, "page": page,
-                "error": "列表接口返回的不是 JSON"}
+                "error": "Steam 列表接口返回的不是 JSON"}
 
     resp_obj = j.get("response") or {}
-    raw_items = resp_obj.get("publishedfiledetails") or []
+    raw_items = (resp_obj.get("publishedfiledetails")
+                 or resp_obj.get("publishedfiledetails") or [])
     total = int(resp_obj.get("total") or 0)
     items: list[dict] = []
     for it in raw_items:

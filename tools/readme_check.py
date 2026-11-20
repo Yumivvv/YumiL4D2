@@ -70,7 +70,7 @@ need = ["今日扫描", "置顶评论", "音量与静音", "右下角", "检查M
         # 本轮：没前置就不出现那一行 + 手动「检查前置」
         "检查前置", "复查前置",
         # 本轮：简介（BBCode 清洗）+ 翻译挪到详情里手动翻
-        "file_description", "description", "_plain_desc", "译成中文", "看原文",
+        "description", "_plain_desc", "译成中文", "看原文",
         # 本轮：合集成员全列出来（流式补齐）+ 稍后看不再卡
         "workshopMembersChanged", "stop_streaming", "syncLaterModel",
         "memberItems", "已列出", "移除", "清空",
@@ -95,7 +95,8 @@ need = ["今日扫描", "置顶评论", "音量与静音", "右下角", "检查M
         "statDateChips", "ElideRight",
         # 本轮：服务器页（A2S 直查 / 收藏 / 直连）
         "A2S", "steam://connect/", "connect ip:port", "m:coop",
-        "l4d2-maps.laoyutang.cn", "hl2master.steampowered.com", "challenge",
+        # 地图中文名现在走内置表（原来那条第三方地图接口已移除，见「致谢」）
+        "_BUILTIN_MAPS", "hl2master.steampowered.com", "challenge",
         "servers_test", "parse_mode",
         # 本轮：服务器表单（名称/权重/多面板/DPAPI 密码）+ IP 直连 + 编辑
         "添加服务器", "IP 直连", "排序权重", "面板地址", "DPAPI",
