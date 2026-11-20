@@ -75,6 +75,7 @@ DEFAULT_SUITE = [
     "update_ui_test",
     "agreement_test",
     "credit_test",
+    "window_close_test",
     "onefile_paths_test",
     "servers_test",
     "downloads_test",

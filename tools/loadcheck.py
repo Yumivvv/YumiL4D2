@@ -109,7 +109,19 @@ def report():
     for w in qml_warn[:20]:
         print("  WARN:", w, flush=True)
     print("RESULT:", "CLEAN" if (not bad and not qml_warn) else "DIRTY", flush=True)
-    app.quit()
+
+    # ★ 用 os._exit 直接收工，不走 app.quit()。
+    #   原因：判定已经做完了（上面读的是「退出前」的日志），再让 Qt 走一遍
+    #   正常的退出流程只会带来两个麻烦 ——
+    #     1) QML 引擎拆树时绑定重新求值，会刷一屏假的
+    #        "Cannot read property 'xxx' of null"（本脚本开头就解释过）；
+    #     2) 窗口 onClosing / 托盘逻辑（core.trayOnClose 默认 True，会
+    #        accepted=false 拒绝关闭）参与进来后，事件循环可能退不出去，
+    #        进程挂在那里 —— 看起来像「超时」，其实是等一个永远不会来的退出。
+    #   这是个「跑完就走」的冒烟脚本，不需要优雅收尾，直接退出最干净。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0 if not (bad or qml_warn) else 1)
 
 
 QTimer.singleShot(2200, step1)

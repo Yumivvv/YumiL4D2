@@ -10,7 +10,7 @@
 ## 打包成独立 exe
 
 双击 **`打包.bat`**（或 `python -m PyInstaller --noconfirm --clean --distpath dist --workpath build tools\build.spec`），
-产物是**一个单文件**：**`dist\Yumi的L4D2工具箱.exe`**（**约 98–99 MB**，本机实测构建约 1.5 分钟）。
+产物是**一个单文件**：**`dist\Yumi的L4D2工具箱.exe`**（**约 104 MB**，本机实测构建约 70 秒）。
 
 **把它拷到任意文件夹、双击就能跑**，第一次运行会在 exe **同目录**自动建好：
 

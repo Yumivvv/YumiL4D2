@@ -158,7 +158,11 @@ class Tray(QObject):
             self.core.library.save()
         finally:
             self.tray.hide()
-            self.app.quit()
+            # ★ 不能直接 app.quit()：那会给窗口发 close 事件，而 QML 的
+            #   onClosing 在「收进托盘」模式下会 accepted=false 把它拦下来，
+            #   结果窗口关不掉、事件循环退不出，进程卡死。
+            #   requestQuit() 会先置 forceQuit 再退出，QML 那边见到就放行。
+            self.core.requestQuit()
 
 
 def main() -> int:
@@ -228,32 +232,20 @@ def main() -> int:
     core.servers.watch_clipboard()
 
     # 窗口关闭 → 收进托盘（可在设置里关掉）；关掉开关时直接退出
-    def _on_closing(close):
-        if core.trayOnClose and QSystemTrayIcon.isSystemTrayAvailable():
-            close.accepted = False
-            if isinstance(window, QQuickWindow):
-                window.hide()
-            # 收进托盘时也要停掉播放器，避免后台还在放声音
-            core.stopVideo()
-            try:
-                tray.tray.showMessage(
-                    "Yumi的L4D2工具箱",
-                    "已最小化到托盘，有新视频时会弹通知提醒你～",
-                    QSystemTrayIcon.MessageIcon.Information,
-                    2500,
-                )
-            except RuntimeError:
-                pass
-        else:
-            close.accepted = True
-            core.shutdown()
-            tray.tray.hide()
-            QTimer.singleShot(0, app.quit)
-
-    try:
-        window.closing.connect(_on_closing)
-    except AttributeError:
-        pass
+    #
+    # ★ 这里**不能**用 `window.closing.connect(普通Python函数)`：
+    #   `closing` 信号带一个 `QQuickCloseEvent*` 参数，PySide6 无法把它
+    #   转换成 Python 对象，运行时会抛
+    #       TypeError: Cannot call meta function "slot(QQuickCloseEvent*)"
+    #       because parameter 0 of type "QQuickCloseEvent*" cannot be converted
+    #   结果是**关闭窗口时那个处理器根本没执行**（收不到托盘、也不退出）。
+    #   实测复现过：connect 本身不报错，但事件触发时 handler 一次都没被调用。
+    #
+    #   所以关闭逻辑写在 QML 的 `onClosing` 里（QML 原生能拿到 close 事件，
+    #   也能改 close.accepted），Python 这边只提供两个**无参**槽：
+    #       core.hideToTray()  —— 收进托盘
+    #       core.quitFromWindow() —— 真正退出
+    #   QML 侧见 qml/Main.qml 顶层的 onClosing。
 
     # 任何方式退出都兜底停掉播放器与流代理
     app.aboutToQuit.connect(core.shutdown)

@@ -40,6 +40,29 @@ Window {
            | Qt.WindowSystemMenuHint
            | Qt.WindowCloseButtonHint
 
+    // 窗口关闭 → 收进托盘（设置里可关掉）；关掉开关时直接退出。
+    //
+    // ★ 必须写在 QML 这边：`Window.closing` 信号的参数是 `QQuickCloseEvent*`，
+    //   PySide6 无法把它转成 Python 对象，在 Python 里 connect 一个函数会在
+    //   事件触发时抛 TypeError、处理器根本不执行（关窗口既不收托盘也不退出）。
+    //   QML 的 onClosing 能正常拿到 close 事件，也能改 close.accepted。
+    //
+    // ★ 还要区分「用户点关闭」和「程序自己要退」：
+    //   app.quit() 也会给窗口发 close 事件。如果无脑 accepted=false，
+    //   退出就被自己拦住了 —— 表现为进程永远退不出去（实测卡死过）。
+    //   所以 Python 侧在主动退出前会把 core.forceQuit 置为 true，
+    //   这时一律放行。
+    onClosing: function(close) {
+        if (core.forceQuit || !core.trayOnClose) {
+            close.accepted = true
+            core.quitFromWindow()
+        } else {
+            close.accepted = false
+            win.hide()
+            core.hideToTray()
+        }
+    }
+
     property int section: 0       // 0=视频监控 1=MOD 管理器
     property int page: 0          // 0=全部 1=新视频
     property bool maximized: false

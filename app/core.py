@@ -314,6 +314,12 @@ class Core(QObject):
         # 当前详情面板上挂着的 bvid：后台刷新回来只推给「还停在这个视频上」的界面
         self._detail_bvid = ""
         self._closing = False
+        # 退出流程是否已经启动过（quitFromWindow 的幂等标志，见那个方法的注释）
+        self._quitting = False
+        # 程序主动退出中：QML 的 onClosing 见到它就放行，不再「收进托盘」。
+        # 没有这个标志的话，app.quit() 触发的 close 会被托盘逻辑拦下，
+        # 于是窗口关不掉、事件循环退不出 → 进程卡死（实测过）。
+        self._force_quit = False
         # 背景图版本号：每次 import / clear 都 +1。QML 的 Image 有 cache，
         # 文件名又不变（永远 background.jpeg），所以靠这个让 source 真的变。
         self._bg_version = 0
@@ -1186,6 +1192,58 @@ class Core(QObject):
         self.config["tray_on_close"] = bool(value)
         self.config.save()
         self.statusChanged.emit()
+
+    # ---- 窗口关闭（由 QML 的 onClosing 调用，见 qml/Main.qml）----
+    #
+    # ★ 为什么放在 QML 侧：`Window.closing` 信号的参数是 `QQuickCloseEvent*`，
+    #   PySide6 没法把它转成 Python 对象，直接 connect 一个 Python 函数会在
+    #   事件触发时抛 TypeError，处理器根本不执行。QML 自己的 onClosing 能
+    #   正常收到 close 事件，所以判定逻辑放那边，这里只提供两个**无参**槽。
+    @Property(bool, notify=statusChanged)
+    def forceQuit(self) -> bool:
+        """程序是否正在主动退出。QML 的 onClosing 据此放行（不再收进托盘）。"""
+        return self._force_quit
+
+    @Slot()
+    def requestQuit(self) -> None:
+        """让程序退出的统一入口（托盘菜单「退出」、QML 关窗等都用它）。
+
+        先把 forceQuit 置上，再走正常的退出流程 —— 否则 app.quit() 触发的
+        close 事件会被「收进托盘」拦下来，进程永远退不出。
+        """
+        self._force_quit = True
+        self.statusChanged.emit()
+        self.quitFromWindow()
+
+    @Slot()
+    def hideToTray(self) -> None:
+        """收进托盘（窗口的显示/隐藏由 QML 负责）。"""
+        self.stopVideo()          # 收进托盘也要停掉播放器，别在后台出声
+        self.toast("已最小化到托盘，有新视频会弹通知", "info")
+
+    @Slot()
+    def quitFromWindow(self) -> None:
+        """真正退出（QML 里 close.accepted = true 之后调用）。
+
+        ★ 必须幂等：`app.quit()` 自己也会给窗口发 close 事件，进而再次触发
+          QML 的 onClosing → 又调到这里。如果每次都 `QTimer.singleShot(0, app.quit)`，
+          就变成「退出 → 触发关闭 → 再排一次退出 → …」的自喂循环，
+          事件循环永远退不出去（实测：loadcheck 跑完 RESULT: CLEAN 后进程挂住不退）。
+          所以这里用一个 `_quitting` 标志挡掉重入。
+        """
+        self._force_quit = True
+        if self._quitting:
+            return
+        self._quitting = True
+        self.shutdown()
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            # 延到下一轮事件循环再退，避免在 close 事件处理里直接销毁对象
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, app.quit)
 
     # ------------------------------------------------------- B 站登录（三连用）
     #
