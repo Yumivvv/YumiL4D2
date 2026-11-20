@@ -322,6 +322,15 @@ def _size_to_bytes(text: str) -> int:
 # 实测 3 个 ID 0.86 秒。
 # ===========================================================================
 PARSE_API = "https://l4d2-workshop-parse.laoyutang.cn/"
+# ★ 单个详情接口（参考 lytvpk 的实现，它走的就是这一条）。
+#   国内实测对比（同一个 ID）：
+#     · `-parse` 批量接口     2.15 秒，返回 2020 字节
+#     · `/detail?id=`         0.87 秒，返回 4075 字节（还带 with_previews 多图）
+#     · 备份线路 `/detail`    0.63~0.70 秒
+#   快 2.5 倍、数据多 2 倍，所以**优先用它**，`-parse` 只在批量补历史时用。
+WORKSHOP_DETAIL_API = "https://l4d2-workshop.laoyutang.cn/detail?id={}"
+# 备份线路：主线路挂了/慢了顶上（lytvpk 也是主备双线）
+WORKSHOP_DETAIL_BACKUP = "https://lytvpk-backup.laoyutang.cn/detail?id={}"
 PARSE_BATCH = 100
 
 
@@ -412,6 +421,88 @@ def _desc_images(text: object) -> list[str]:
     return out[:12]
 
 
+def _details_one(wid: str, timeout: int = 12) -> dict[str, dict]:
+    """查**单个**工坊详情的快通道（参考 lytvpk：走 `/detail?id=`）。
+
+    实测比批量 `-parse` 接口快 2.5 倍（0.87s vs 2.15s），而且带 `with_previews=1`
+    时多返回作者贴的效果图。主线路挂了立刻退备份线路（lytvpk 也是主备双线）。
+
+    返回结构和 `_details_parse` 完全一致，调用方不用区分。
+    """
+    key = str(wid or "").strip()
+    if not key.isdigit():
+        return {}
+    for url in (WORKSHOP_DETAIL_API.format(key) + "&with_previews=1",
+                WORKSHOP_DETAIL_BACKUP.format(key) + "&with_previews=1"):
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        try:
+            status, raw, _ = _http(req, timeout)
+        except (urllib.error.URLError, TimeoutError, OSError):
+            continue
+        if int(status or 0) != 200:
+            continue
+        try:
+            js = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        det = ((js or {}).get("response") or {}).get("publishedfiledetails") or []
+        if not isinstance(det, list) or not det:
+            continue
+        row = det[0]
+        if isinstance(row, dict):
+            # 复用批量接口那套字段映射：把单条包装成同一形状再走一次
+            out = _details_parse_rows([row])
+            if out:
+                return out
+    return {}
+
+
+def _details_parse_rows(arr: list) -> dict[str, dict]:
+    """把「publishedfiledetails 数组」映射成我们的统一结构（_details_parse 的公共部分）。"""
+    out: dict[str, dict] = {}
+    for f in arr or []:
+        if not isinstance(f, dict):
+            continue
+        wid = str(f.get("publishedfileid") or "")
+        if not wid:
+            continue
+        kids = [str(c.get("publishedfileid") or "")
+                for c in (f.get("children") or []) if isinstance(c, dict)]
+        kids = [k for k in kids if k.isdigit()]
+        ftype = int(f.get("file_type") or 0)
+        out[wid] = {
+            "id": wid,
+            # 合集的 result 常常是 0（中转拿不到合集自身的文件信息），
+            # 但这不影响判断：file_type 会给 2。
+            "ok": int(f.get("result") or 0) == 1,
+            "title": (f.get("title") or "").strip(),
+            "preview": f.get("preview_url") or "",
+            "size": _int_or_zero(f.get("file_size")),
+            "author": str(f.get("creator") or ""),
+            "appId": 0,
+            "filename": f.get("filename") or "",
+            # 简介（不同来源叫 file_description 或 description）
+            "desc": _plain_desc(f.get("file_description") or f.get("description")),
+            # ★ 中转直接给了 CDN 上的文件地址（file_url）。对**单文件 .vpk** 来说
+            #   它就是下载直链，省掉「去下载站换直链」那一趟（那一步实测要 2~7 秒
+            #   而且经常连不上）。多文件条目 Steam 只给第一个文件的地址，不能当
+            #   整体下载用 —— 判据见 direct_file_url()。
+            "fileUrl": (f.get("file_url") or "").strip(),
+            "fileType": ftype,
+            # 只有合集才有「成员数」；单个 MOD 也会带 children（那是它的前置/
+            # 关联项），别把它当成员数，否则卡片上会冒出「合集 1」。
+            "children": len(kids) if ftype == 2 else 0,
+            "childrenIds": kids,
+            # 简介里作者自己贴的效果图（BB Code 的 [img]）——详情里可以切换查看。
+            # 快通道额外给的 `previews` 也一起并进来（那是作者上传的多张预览图）。
+            "descImages": _desc_images(
+                f.get("file_description") or f.get("description") or ""),
+            "previews": [str(u) for u in (f.get("previews") or [])
+                         if isinstance(u, str) and u.strip()][:12],
+        }
+    return out
+
+
 def _details_parse(ids: list[str], timeout: int = 20) -> dict[str, dict]:
     """一次问一批 ID 的详情（返回结构和 _details_batch 一致）。"""
     if not ids:
@@ -434,44 +525,7 @@ def _details_parse(ids: list[str], timeout: int = 20) -> dict[str, dict]:
         return {}
     if not isinstance(arr, list):
         return {}
-    out: dict[str, dict] = {}
-    for f in arr:
-        if not isinstance(f, dict):
-            continue
-        wid = str(f.get("publishedfileid") or "")
-        if not wid:
-            continue
-        kids = [str(c.get("publishedfileid") or "")
-                for c in (f.get("children") or []) if isinstance(c, dict)]
-        kids = [k for k in kids if k.isdigit()]
-        ftype = int(f.get("file_type") or 0)
-        out[wid] = {
-            "id": wid,
-            # 合集的 result 常常是 0（中转拿不到合集自身的文件信息），
-            # 但这不影响判断：file_type 会给 2。
-            "ok": int(f.get("result") or 0) == 1,
-            "title": (f.get("title") or "").strip(),
-            "preview": f.get("preview_url") or "",
-            "size": _int_or_zero(f.get("file_size")),
-            "author": str(f.get("creator") or ""),
-            "appId": 0,
-            "filename": f.get("filename") or "",
-            # 简介（中转给的字段叫 file_description，里面是 BBCode）
-            "desc": _plain_desc(f.get("file_description")),
-            # ★ 中转直接给了 CDN 上的文件地址（file_url）。对**单文件 .vpk** 来说
-            #   它就是下载直链，省掉「去下载站换直链」那一趟（那一步实测要 2~7 秒
-            #   而且经常连不上）。多文件条目 Steam 只给第一个文件的地址，不能当
-            #   整体下载用 —— 判据见 direct_file_url()。
-            "fileUrl": (f.get("file_url") or "").strip(),
-            "fileType": ftype,
-            # 只有合集才有「成员数」；单个 MOD 也会带 children（那是它的前置/
-            # 关联项），别把它当成员数，否则卡片上会冒出「合集 1」。
-            "children": len(kids) if ftype == 2 else 0,
-            "childrenIds": kids,
-            # 简介里作者自己贴的效果图（CBBCode 的 [img]）——详情里可以切换查看
-            "descImages": _desc_images(f.get("file_description")),
-        }
-    return out
+    return _details_parse_rows(arr)
 
 
 # ===========================================================================
@@ -500,8 +554,19 @@ def fetch_details(wids: Iterable[str] | None = None, wid: str | None = None,
             out[i] = hit
         else:
             missing.append(i)
-    # ---- 1. 先走国内中转（快）：一次 100 个 ----
+    # ---- 1. 先走国内中转（快）----
+    # ★ 数量少时（详情页点开一张卡片就是 1 个）用**单条 /detail 接口**：
+    #   实测 0.87 秒 vs 批量 -parse 的 2.15 秒，快 2.5 倍还多一倍数据。
+    #   数量多时仍是 -parse 批量（一次 100 个），那才是它的强项。
     parsed: dict[str, dict] = {}
+    single_ids = [i for i in missing if i.isdigit()]
+    if 0 < len(single_ids) <= 6:
+        with ThreadPoolExecutor(max_workers=max(1, len(single_ids))) as pool:
+            for one in pool.map(lambda w: _details_one(w, timeout), single_ids):
+                if one:
+                    parsed.update(one)
+        missing = [i for i in missing if i not in parsed]
+
     p_batches = [missing[i: i + PARSE_BATCH] for i in range(0, len(missing), PARSE_BATCH)]
     if p_batches:
         if len(p_batches) <= 1:

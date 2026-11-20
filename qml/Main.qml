@@ -6461,6 +6461,14 @@ Window {
 
     Component.onCompleted: {
         syncTheme();
+        // ★ 启动时让「侧栏高亮 / page」跟配置里的「只看新的」对齐。
+        //   用户报的：「打开软件后只看新的是开着的，但界面停在全部视频里」——
+        //   因为 `page` 默认 0（全部），`core.showOnlyNew` 却从 config 读成 true，
+        //   两个状态各说各的：侧栏高亮「全部视频」、开关却是开的。
+        //   这里统一按 core 的真值同步一次。
+        if (core) {
+            win.page = core.showOnlyNew ? 1 : 0;
+        }
         // 用户协议：只在「还没同意过 / 协议改版了」时弹。
         // 延到界面画完之后再弹（0ms），否则弹窗会在窗口还透明的时候出现，
         // 看着像闪了一下。
@@ -6474,6 +6482,15 @@ Window {
     Connections {
         target: core
         function onStatusChanged() {
+            // ★ 后端可能在扫描后**自动关掉**「只看新的」（没有新视频时不让列表空着）。
+            //   以前它只改 config，QML 的 `page` 还停在 1（新视频）：
+            //   于是会出现「开关关了、侧栏却还高亮新视频、列表又变成全部」的三方不一致。
+            //   这里把 page 跟着 core.showOnlyNew 拉回来。
+            if (core && win.section === 0) {
+                var want = core.showOnlyNew ? 1 : 0;
+                if (win.page !== want)
+                    win.page = want;
+            }
             syncTheme();
         }
     }

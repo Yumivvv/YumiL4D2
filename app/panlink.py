@@ -314,6 +314,13 @@ def _url_matches(text: str) -> list[tuple[str, int, int]]:
 
     token 的原始区间也要带出去：提取码和文件说明都是根据「链接在原文里的位置」推断的，
     清洗会改变长度，所以只能用 token 在原文里的起止来定位上下文。
+
+    ★★ 还要支持**裸域名**（没有 ``https://`` 的写法）。
+      用户报的真实案例：
+          ``pan.qu【删】ark.cn/s/2ce22bd402e3?pwd=U7sV``
+      以及更常见的「链接: pan.quark.cn/s/xxx 提取码: abcd」——
+      作者贴链接时经常把协议头省掉。以前只认 ``https?://``，这类链接**整条漏掉**。
+      现在：清洗后如果开头就是一个已知网盘域名，自动补成 ``https://``。
     """
     out: list[tuple[str, int, int]] = []
     for tm in re.finditer(r"\S+", text):
@@ -322,11 +329,60 @@ def _url_matches(text: str) -> list[tuple[str, int, int]]:
         cleaned = _clean_url(token)
         if not cleaned:
             continue
+
+        found: list[str] = []
         for um in re.finditer(r"https?://\S+", cleaned):
             url = um.group(0).strip(".,;:!?)】]》\"'")
             if len(url) >= 12:
-                out.append((url, tm.start(), tm.end()))
+                found.append(url)
+
+        if not found:
+            # 没有协议头：看这个 token 里是不是藏着裸网盘域名
+            bare = _bare_pan_url(cleaned)
+            if bare:
+                found.append(bare)
+
+        for url in found:
+            out.append((url, tm.start(), tm.end()))
     return out
+
+
+# 裸域名（没有 https://）的形态：域名 + 可选路径
+_BARE_URL_RE = re.compile(
+    r"((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,24}(?:/[^\s]*)?)"
+)
+# 裸域名后面允许出现的字符（中文说明不该被吃进 URL）
+_BARE_TAIL_STOP = "，。、；：！？【】《》「」\"'"
+
+
+def _bare_pan_url(cleaned: str) -> str:
+    """从一段**没有协议头**的文本里揪出裸网盘域名，补成 ``https://…``。
+
+    只认 ``PAN_HOSTS`` 里登记过的域名（避免把说明文字里的英文缩写当成链接），
+    返回空串表示这个 token 里没有网盘链接。
+    """
+    s = str(cleaned or "").strip()
+    if not s:
+        return ""
+    # 先按空白 / 常见中文标点切段，再逐段找域名
+    for chunk in re.split(r"[\s%s]+" % re.escape(_BARE_TAIL_STOP), s):
+        chunk = chunk.strip(".,;:!?)]}》\"'")
+        if not chunk or "." not in chunk:
+            continue
+        m = _BARE_URL_RE.search(chunk)
+        if not m:
+            continue
+        candidate = m.group(1)
+        # 末尾可能粘着「提取码」之类中文：在第一个中文/全角处截断
+        candidate = re.split(r"[\u4e00-\u9fff\uff00-\uffef]", candidate)[0]
+        candidate = candidate.strip(".,;:!?)]}》\"'")
+        if len(candidate) < 8:
+            continue
+        host = candidate.split("/")[0].lower()
+        if not _host_label("https://" + host):
+            continue          # 不是已知网盘域名
+        return "https://" + candidate
+    return ""
 
 
 def extract_links(text: str, max_links: int = 8, fallback_label: str = "") -> list[dict]:
