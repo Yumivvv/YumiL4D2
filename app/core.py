@@ -727,6 +727,11 @@ class Core(QObject):
     APP_AUTHOR = "Yumi"
     APP_HOMEPAGE = "https://github.com/Yumivvv/YumiL4D2"
 
+    # 技术参考的开源项目（致谢）。同样只在这里写一次。
+    CREDIT_NAME = "LytVPK"
+    CREDIT_AUTHOR = "LaoYutang"
+    CREDIT_HOMEPAGE = "https://github.com/LaoYutang/lytvpk"
+
     @Property(str, constant=True)
     def aboutName(self) -> str:
         from . import APP_NAME
@@ -755,6 +760,44 @@ class Core(QObject):
             if url.startswith(prefix):
                 url = url[len(prefix):]
         return url.rstrip("/")
+
+    # ---- 致谢（技术参考）----
+    @Property(str, constant=True)
+    def creditName(self) -> str:
+        return self.CREDIT_NAME
+
+    @Property(str, constant=True)
+    def creditAuthor(self) -> str:
+        return self.CREDIT_AUTHOR
+
+    @Property(str, constant=True)
+    def creditHomepage(self) -> str:
+        return self.CREDIT_HOMEPAGE
+
+    @Property(str, constant=True)
+    def creditHomepageText(self) -> str:
+        """致谢项目地址的显示文本（去掉 https://）。"""
+        url = self.CREDIT_HOMEPAGE
+        for prefix in ("https://", "http://"):
+            if url.startswith(prefix):
+                url = url[len(prefix):]
+        return url.rstrip("/")
+
+    @Property(str, constant=True)
+    def creditText(self) -> str:
+        """致谢那段说明（一行，界面上会换行显示）。"""
+        return (f"本项目的产品思路与部分技术方案参考了开源项目 "
+                f"{self.CREDIT_NAME}（作者 {self.CREDIT_AUTHOR}），特此致谢。")
+
+    @Property(str, constant=True)
+    def creditScope(self) -> str:
+        """参考范围（逐条列，避免含糊）。"""
+        return ("参考范围：工坊浏览（分类分组／单件·合集切换／排序／ID 直达／"
+                "稍后看／合集子项）、MOD 加载顺序编辑器（拖动排序 + 缺项标红）、"
+                "应用更新检查（GitHub Releases + 从重定向 URL 取版本号）、"
+                "CDN 优选（测延迟挑最近节点）、工坊 DNS（CNAME 跟随与跳数上限）、"
+                "CDN 兜底 IP 表。以上代码均为本项目用 Python + QML 独立实现；"
+                "VPK 解析、A2S 查询、网盘链接提取、B 站登录、下载器为独立实现。")
 
     @Property(str, constant=True)
     def dataDir(self) -> str:
@@ -787,6 +830,16 @@ class Core(QObject):
     @Slot()
     def copyHomepage(self) -> None:
         self.copyText(self.APP_HOMEPAGE)
+
+    @Slot()
+    def openCreditPage(self) -> None:
+        """打开致谢项目（LytVPK）的 GitHub 页面。"""
+        self.openUrl(self.CREDIT_HOMEPAGE)
+
+    @Slot()
+    def copyCredit() -> None:
+        """复制致谢项目地址。"""
+        self.copyText(self.CREDIT_HOMEPAGE)
 
     @Property(str, notify=statusChanged)
     def bgImageUrl(self) -> str:

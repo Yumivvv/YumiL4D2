@@ -50,7 +50,7 @@ need_readme = [
     # 指向长文
     "docs/DEVELOPMENT.md",
     # 隐私与许可
-    "数据与隐私", "Steam API Key", "GPL-3.0",
+    "数据与隐私", "不需要任何 API Key", "GPL-3.0",
 ]
 for s in need_readme:
     assert s in text, f"README 缺少：{s}"

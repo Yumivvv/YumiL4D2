@@ -4658,6 +4658,143 @@ Window {
                             onClicked: core.checkUpdate()
                         }
 
+                        // ---- 致谢（技术参考）----
+                        // 文案全部来自 core.credit*（见 app/core.py），QML 只排版。
+                        Rectangle {
+                            objectName: "creditBox"
+                            width: parent.width
+                            height: creditCol.implicitHeight + 24
+                            radius: Theme.radiusXS
+                            color: Theme.scrim(0.03)
+                            border.width: 1
+                            border.color: Theme.border
+
+                            Column {
+                                id: creditCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: 12
+                                spacing: 6
+
+                                Row {
+                                    spacing: 6
+                                    Text {
+                                        text: "\uE8F1"   // 心形 / 致谢图标
+                                        color: Theme.accent
+                                        font.family: Theme.iconFont
+                                        font.pixelSize: 11
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    Text {
+                                        text: "致谢"
+                                        color: Theme.textDim
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                }
+
+                                Text {
+                                    objectName: "creditTextLabel"
+                                    width: parent.width
+                                    text: core.creditText
+                                    color: Theme.text
+                                    font.family: Theme.uiFont
+                                    font.pixelSize: 10
+                                    wrapMode: Text.Wrap
+                                    lineHeight: 1.45
+                                }
+
+                                Text {
+                                    objectName: "creditScopeLabel"
+                                    width: parent.width
+                                    text: core.creditScope
+                                    color: Theme.textMute
+                                    font.family: Theme.uiFont
+                                    font.pixelSize: 10
+                                    wrapMode: Text.Wrap
+                                    lineHeight: 1.45
+                                }
+
+                                // 项目地址：整行可点（开浏览器），右侧「复制」
+                                Rectangle {
+                                    objectName: "creditLink"
+                                    width: parent.width
+                                    height: 32
+                                    radius: Theme.radiusXS
+                                    color: crMa.containsMouse ? Theme.scrim(0.075)
+                                                             : Theme.scrim(0.035)
+                                    border.width: 1
+                                    border.color: crMa.containsMouse ? Theme.borderHi
+                                                                     : Theme.border
+                                    Behavior on color { ColorAnimation { duration: 90 } }
+
+                                    Row {
+                                        anchors.left: parent.left
+                                        anchors.leftMargin: 10
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        spacing: 7
+                                        Text {
+                                            text: "\uE774"   // GitHub 链子图标
+                                            color: Theme.textMute
+                                            font.family: Theme.iconFont
+                                            font.pixelSize: 11
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Column {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            spacing: 1
+                                            Text {
+                                                text: core.creditName
+                                                color: Theme.text
+                                                font.family: Theme.uiFont
+                                                font.pixelSize: 10
+                                                font.weight: Font.DemiBold
+                                            }
+                                            Text {
+                                                text: core.creditHomepageText
+                                                color: Theme.textMute
+                                                font.family: Theme.monoFont
+                                                font.pixelSize: 9
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        objectName: "creditOpenLabel"
+                                        anchors.right: parent.right
+                                        anchors.rightMargin: 10
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: "打开"
+                                        color: Theme.accent
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: 10
+                                        font.weight: Font.DemiBold
+                                    }
+
+                                    MouseArea {
+                                        id: crMa
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: core.openCreditPage()
+                                    }
+                                }
+
+                                ActionButton {
+                                    objectName: "creditCopyBtn"
+                                    width: parent.width
+                                    height: 28
+                                    accent: false
+                                    label: "复制致谢项目地址"
+                                    onClicked: core.copyCredit()
+                                }
+                            }
+                        }
+
                         Text {
                             width: parent.width
                             text: "本程序按 GPL-3.0 发布，源码在 GitHub 上可以随便看、随便改；"

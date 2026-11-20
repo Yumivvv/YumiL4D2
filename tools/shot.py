@@ -1,4 +1,4 @@
-﻿"""截图工具：加载 Main.qml，抓取界面到 data/preview.png。"""
+"""截图工具：加载 Main.qml，抓取界面到 data/preview.png。"""
 import os
 import sys
 import time
@@ -481,6 +481,25 @@ def main() -> int:
                     "netAccelSection" if MODE == "settings-net" else "workshopDnsSection",
                     flick is not None, col is not None, sec is not None)
             wait_ms(400)
+        elif MODE == "settings-credit":
+            # 设置 → 关于 → 致谢（「关于」是最后一节，直接滚到底）
+            win.setProperty("section", 5)
+            wait_ms(900)
+            flick = win.findChild(QObject, "settingsFlick")
+            box = win.findChild(QObject, "creditBox")
+            if flick is not None:
+                # 滚到底：致谢就在「关于」卡片里，靠底部
+                for _ in range(3):
+                    h = float(flick.property("contentHeight") or 0)
+                    vh = float(flick.property("height") or 0)
+                    flick.setProperty("contentY", max(0.0, h - vh))
+                    wait_ms(350)
+                log("settings-credit", "contentY =",
+                    round(float(flick.property("contentY") or 0), 1),
+                    "box 找到 =", box is not None)
+            else:
+                log("  [warn] 没找到 settingsFlick")
+            wait_ms(500)
         elif MODE == "settings-accent":
             # 主题色取色面板（色盘）：滚到那一块再拍
             win.setProperty("section", 5)

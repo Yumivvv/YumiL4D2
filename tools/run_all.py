@@ -74,6 +74,7 @@ DEFAULT_SUITE = [
     "detail_actions_test",
     "update_ui_test",
     "agreement_test",
+    "credit_test",
     "onefile_paths_test",
     "servers_test",
     "downloads_test",
