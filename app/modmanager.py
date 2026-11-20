@@ -3661,19 +3661,23 @@ class ModManager(QObject):
         self._browse_total = int(res.get("total") or 0)
         self._browse_page = WN.normalize_page(res.get("page") or 1)
         self._browse_error = ""
-        # 到底的判断：这一页空了、或者已经装满了总数、或者页数到上限
+        # 到底的判断：这一页空了、或者这页不满 30 条（网页一页固定 30 条）、
+        # 或者页数到上限。
+        # ★ 网页版拿不到「总数」，所以不再用 `loaded >= total` 判断；
+        #   fetch_workshop_list 会带 hasMore（本页是否满 30 条）回来。
         loaded = len(self._browse_items)
+        has_more = res.get("hasMore")
+        if has_more is None:
+            has_more = raw_count >= 30
         self._browse_done = (
             not raw_items
-            or loaded >= self._browse_total
+            or not has_more
             or self._browse_page >= 1000
-            or raw_count < 20
         )
         self._browse_more = False
         self._browse_loading = False
         kind_label = "合集" if self._browse_kind == "collection" else "单件"
-        self._set_status(f"工坊 · {kind_label} · 已加载 {loaded} / "
-                         f"{self._browse_total} 个")
+        self._set_status(f"工坊 · {kind_label} · 已加载 {loaded} 个")
         if append:
             self.browseAppended.emit()
         self.browseChanged.emit()
@@ -3688,12 +3692,8 @@ class ModManager(QObject):
 
         def worker() -> None:
             try:
-                # ★ 列表接口（Steam QueryFiles）必须带用户自己的 API Key。
-                #   key 存在 config 里，由用户在「设置 → 网络」填；
-                #   没填时 fetch_workshop_list 会返回 needKey + 明确提示，
-                #   不会悄悄调任何第三方中转。
-                res = WN.fetch_workshop_list(q, p, s, tags=tags, kind=k,
-                                             api_key=self._steam_api_key())
+                # ★ 列表走 Steam 工坊网页，**不需要 API Key**。
+                res = WN.fetch_workshop_list(q, p, s, tags=tags, kind=k)
             except Exception as e:  # noqa: BLE001
                 res = {"ok": False, "items": [], "total": 0,
                        "error": f"拉取列表出错：{e}"}
@@ -3705,35 +3705,11 @@ class ModManager(QObject):
         threading.Thread(target=worker, daemon=True).start()
 
     def _steam_api_key(self) -> str:
-        """读用户自己填的 Steam Web API Key（空串 = 没填）。"""
-        try:
-            return str(self._cfg["steam_api_key"] or "").strip()
-        except (KeyError, TypeError):
-            return ""
+        """★ 已废弃：工坊列表改走网页版，不再需要 API Key。
 
-    @Property(bool, notify=statusChanged)
-    def hasSteamApiKey(self) -> bool:
-        """列表搜索需要 key —— 界面据此提示用户去填。"""
-        return bool(self._steam_api_key())
-
-    @Property(str, notify=statusChanged)
-    def steamApiKeyHint(self) -> str:
-        return WN.NO_KEY_ERROR if not self._steam_api_key() else ""
-
-    @Slot(str)
-    def setSteamApiKey(self, value: str) -> None:
-        """保存用户的 Steam Web API Key（只存本地 config.json）。"""
-        key = str(value or "").strip()
-        self._cfg["steam_api_key"] = key
-        try:
-            self._cfg.save()
-        except Exception:  # noqa: BLE001
-            pass
-        if key:
-            self._set_status("已保存 Steam API Key，可以浏览工坊列表了")
-        else:
-            self._set_status("已清空 Steam API Key（列表搜索会不可用）")
-        self.statusChanged.emit()
+        保留这个方法只是为了不让老的外部调用直接崩，永远返回空串。
+        """
+        return ""
 
     @Slot(str, str, str, "QVariantList")
     def browseFilter(self, query: str = "", sort: str = "trend",

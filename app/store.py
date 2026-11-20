@@ -88,10 +88,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 工坊 DNS：和上面的「网络加速」是**两件独立的事**——
     "workshop_dns_mode": "dnspod",
     "workshop_dns_custom": "",
-    # Steam Web API Key（用户自己的）。
-    # ★ 只有「工坊列表 / 搜索」需要它：Steam 的 QueryFiles 接口强制要 key，
-    #   不带 key 直接 403。详情、下载、合集展开都不需要。
-    #   存在本地 config.json，不进仓库、不上传。
+    # ★ 已废弃：曾经存过用户的 Steam Web API Key（工坊列表要用）。
+    #   2026-11 起列表/搜索改走 Steam 工坊网页，不再需要 key。
+    #   字段留着只是为了兼容老配置文件（读进来不报错、也不再用它）。
     "steam_api_key": "",
     # 创意工坊「稍后看」：只存工坊 ID 列表，详情按需再拉
     "workshop_later": [],

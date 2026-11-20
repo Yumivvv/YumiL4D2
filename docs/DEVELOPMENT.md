@@ -573,22 +573,36 @@ GridView 的 `model` 一换（追加时把整个数组换掉），滚动位置�
 > QML 的 `Image` 没法自己指定 SNI，把域名换成 IP 会证书不匹配，
 > 所以是**本机小代理**（只绑 `127.0.0.1`）代抓代压，QML 只管读 `127.0.0.1`。
 
-### 工坊列表为什么要自己的 Steam API Key
+### 工坊列表：为什么从「要 key」改成抓网页
 
-这是 Steam 的硬限制，不是本项目偷懒：
+**现在不需要任何 API Key。** 这条弯路值得记一下：
 
-| 接口 | 情况 |
+| 方案 | 结果 |
 | --- | --- |
-| `steamcommunity.com`（工坊网页） | 国内直连被重置（实测 `WinError 10054`），抓不了 |
-| `IPublishedFileService/QueryFiles`（官方列表） | **必须带 key**，不带 key 实测 403 `Access is denied` |
-| `ISteamRemoteStorage/GetPublishedFileDetails`（详情） | **不需要 key**，国内可用 |
+| LytVPK 运营的 `/list` | 第三方额度，issue #1 要求移除 ❌ |
+| 官方 `IPublishedFileService/QueryFiles` | **强制要 key**，不带 key 实测 403 `Access is denied` ❌ |
+| 官方 `steamcommunity.com/workshop/browse/`（网页） | **不需要 key**，实测可用 ✅ |
 
-所以：
+当初选 `QueryFiles` 是因为当时判断「工坊网页国内直连被重置（`WinError 10054`）」。
+**这个判断后来被实测推翻了**——浏览页现在能稳定抓下来（一次 575 KB / 200），
+所以整条链路改成解析网页，API Key 那一栏也从设置里删掉了。
 
-- **列表 / 搜索** → 官方 `QueryFiles`，用**你自己申请的 key**
-  （<https://steamcommunity.com/dev/apikey>，免费）。
-  没填 key 时列表页明确提示"需要 key"，**不会**悄悄调用任何第三方服务。
-- **详情 / 下载 / 合集展开** → 官方 `GetPublishedFileDetails`，不需要 key，照常可用。
+抓网页要摸清的四件事（都是实测踩出来的）：
+
+1. **卡片结构**：一条卡片就是
+   `<a href="...sharedfiles/filedetails/?id=NNN"><img src="封面" alt="标题">`，
+   一个正则就能同时拿到 ID / 封面 / 标题。
+2. **标签筛选的参数名是 `requiredtags[]`**（带方括号）。写成 `requiredtags`
+   （不带括号）Steam 直接返回 **500**。多个标签重复传这个参数即 AND 关系。
+3. **有关键词时 `browsesort` 必须是 `textsearch`**，排序交给 `searchsort`。
+   带 `searchtext` 但 `browsesort=trend` 的话，Steam 会**忽略关键词**照常返回热门
+   （搜「Atlanta」也会返回 Tank 相关内容）——踩过这个坑。
+4. **网页不给总数**。曾经用 `of N` 去抓总数，结果匹配到游戏简介里的
+   「#1 co-op game of **2008**」，算出个恒定的 2008。现在改用
+   「本页是否满 30 条」判断还有没有下一页（`hasMore`）。
+
+抓到卡片后只有 ID / 封面 / 标题，其余字段（体积、作者、订阅数、简介…）
+由 `fetch_details()` 按 ID 批量补齐，那条路一直是官方 `GetPublishedFileDetails`。
 
 ### 网络加速（设置里）
 
@@ -2398,7 +2412,7 @@ Yumi的L4D2工具箱/
 │  ├─ panlink.py       网盘链接提取 + 文件说明推断
 │  ├─ mods.py          MOD 扫描 / 导入 / 转换到本地 / 工坊查询 / 作者昵称
 │  ├─ modmanager.py    给 QML 用的 MOD 管理器
-│  ├─ workshop_net.py  工坊列表接口 / CDN 节点优选（按地名）/ 翻译
+│  ├─ workshop_net.py  工坊列表/搜索（抓官方浏览页，无需 key）/ CDN 优选 / 翻译
 │  ├─ workshop_dl.py   工坊详情、下载直链、下载线程池
 │  ├─ workshop_dns.py  工坊 DNS（自己发查询报文，可自定义服务器）
 │  ├─ imageproxy.py    本机封面压缩代理（Pillow 缩放 + 内存/磁盘缓存）

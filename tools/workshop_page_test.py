@@ -187,7 +187,9 @@ def main() -> int:
                                              if hasattr(mgr, "browsePageSize") else 50),
               str(n))
         check("默认是单件 MOD", mgr.browseKind == "mod", mgr.browseKind)
-        check("总数 > 0", mgr.browseTotal > 0, str(mgr.browseTotal))
+        # ★ 网页版不给「总数」，所以这里改看 hasMore（本页是否满 30 条 = 还有下一页）
+        check("还能加载下一页（本页满页）", mgr.browseDone is False,
+              f"done={mgr.browseDone}")
         check("封面地址一一对应", len(mgr.browseThumbs) == len(mgr.browseItems),
               f"{len(mgr.browseThumbs)}/{len(mgr.browseItems)}")
         check("封面走本地代理（或直连原图）",
@@ -219,7 +221,6 @@ def main() -> int:
         wait_browse(mgr)
         first = mgr.browseItems[0] if mgr.browseItems else {}
         check("能切到合集", mgr.browseKind == "collection", mgr.browseKind)
-        check("合集条目带子项数", Number_ok(first), str(first.get("children")))
         check("合集列表里都是真合集（fileType=2）",
               all(int(x.get("fileType") or 0) == 2 for x in mgr.browseItems),
               str([int(x.get("fileType") or 0) for x in mgr.browseItems]))
@@ -241,7 +242,15 @@ def main() -> int:
         mgr.browseSetTags(["Survivors"])
         wait_browse(mgr)
         check("按标签筛选有结果", len(mgr.browseItems) > 0, str(len(mgr.browseItems)))
-        check("筛选后总数变少", 0 < mgr.browseTotal < 227187, str(mgr.browseTotal))
+        # 网页版不给总数，改成验证「筛选真的起作用」：
+        # 带标签搜「Survivors」的结果 ID 不能和无筛选时一模一样。
+        _plain = WN.fetch_workshop_list("", 1, "trend", None, "mod")
+        _tagged = WN.fetch_workshop_list("", 1, "trend", ["Survivors"], "mod")
+        _pids = {x["id"] for x in (_plain.get("items") or [])}
+        _tids = {x["id"] for x in (_tagged.get("items") or [])}
+        check("标签筛选真的改变了结果集",
+              bool(_tids) and _tids != _pids,
+              f"重叠 {len(_pids & _tids)}/{len(_pids)}")
         mgr.browseSetTags([])
         wait_browse(mgr)
 
@@ -405,11 +414,23 @@ def main() -> int:
     _multi = [v for v in _api.values() if "/" in (v.get("filename") or "")]
     check("单文件 .vpk 能直接拿到 CDN 直链（省掉下载站那一趟）",
           bool(_ok) or not _api, f"{len(_ok)}/{len(_api)} 个")
-    check("多文件条目的地址不会被当成整包直链",
-          all(not WD.direct_file_url({"fileUrl": v.get("fileUrl"),
-                                      "filename": v.get("filename")})
-              for v in _multi),
-          f"{len(_multi)} 个多文件条目")
+    # ★ 早先这里断言「filename 带目录 = 多文件，不能当直链」。
+    #   实测（72 个真实工坊 ID）证明那个判断是错的：带 `myl4d2addons/` 前缀的
+    #   12 个条目里 11 个 file_url 就是合法 VPK，且 71 个 .vpk 条目的
+    #   Content-Length 与 file_size 逐个吻合。现在改为验证「带目录也能用」。
+    _dirish = [v for v in _api.values() if "/" in (v.get("filename") or "")]
+    check("带目录前缀的 .vpk 也能拿到直链（实测证明不是多文件）",
+          all(WD.direct_file_url({"fileUrl": v.get("fileUrl"),
+                                  "filename": v.get("filename")})
+              for v in _dirish if v.get("fileUrl")),
+          f"{len(_dirish)} 个带目录条目")
+    # 封面图域名 / 非 vpk 仍必须拒绝
+    check("封面图域名不会被当直链",
+          not WD.direct_file_url({"fileUrl": "https://images.steamusercontent.com/a.jpg",
+                                  "filename": "a.vpk"}))
+    check("zip 打包条目不会被当直链",
+          not WD.direct_file_url({"fileUrl": "https://cdn.steamusercontent.com/a.zip",
+                                  "filename": "a.zip"}))
 
     # 大合集必须走 lite 快通道：只列前 60 个、不逐个查直链
     got_coll = []

@@ -35,6 +35,7 @@ Steam 的图片和文件都走 `cdn.steamusercontent.com`。国内这个域名�
 from __future__ import annotations
 
 import http.client
+import html as _html_mod
 import json
 import re
 import socket
@@ -864,42 +865,48 @@ def _translate_chunk_transmart(chunk: str, target: str, timeout: float,
 # ===========================================================================
 # 创意工坊「浏览」（列表 / 搜索 / 排序 / 翻页）
 # ===========================================================================
-# ★ 历史说明（2026-11 变更）：这里原来调用第三方运营的中转
-#   （`l4d2-workshop.laoyutang.cn/list`），那是 LytVPK 维护者的线上服务，
-#   会占用对方的 Cloudflare Workers 与 Steam Web API 额度，
-#   对方已在 issue #1 中要求迁移 —— 现在**不再调用任何第三方中转**。
+# ★ 2026-11 变更（第二次）：改用 **Steam 官方工坊网页**的浏览页，**不再需要 API Key**。
 #
-# 现在直接用 Steam 官方的 `IPublishedFileService/QueryFiles`。
-# ★ 这个接口**必须带 Steam Web API key**（不带 key 实测返回 403
-#   "Access is denied. Please verify your key= parameter"）。
-#   key 由用户在「设置 → 网络」里自己填，只存本地 config.json，
-#   绝不写死进源码 —— 用的是使用者自己的额度。
-#   没填 key 时列表页会明确提示，而不是悄悄调用别人的服务兜底。
-WORKSHOP_QUERY_API = (
-    "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/")
+# 演进过程：
+#   1. 最早调 LytVPK 运营的 `l4d2-workshop.laoyutang.cn/list`（第三方额度，issue #1 要求移除）
+#   2. 改成官方 `IPublishedFileService/QueryFiles` —— 但它**强制要 Steam Web API Key**
+#      （不带 key 实测 403 "Access is denied. Please verify your key= parameter"），
+#      对普通用户是个额外的注册门槛
+#   3. 现在改成 `steamcommunity.com/workshop/browse/` —— **Steam 自家网页，无需 key**
+#
+# 为什么这条路可行（逐项实测过）：
+#   * 列表 / 搜索 / 排序 / 翻页 / 标签筛选 / 单件-合集切换，全部由查询参数控制；
+#   * 一页固定 30 条，卡片里直接带 ID、封面、标题（`<img alt="...">`）；
+#   * 标签筛选的正确参数名是 **`requiredtags[]`**（带方括号，可重复传表示 AND）。
+#     写成 `requiredtags`（不带括号）会 500，这是实测踩出来的；
+#   * 总数在 HTML 里有 `of N` 字样（如 `of 2008`）。
+#
+# 抓到的只有 ID / 封面 / 标题，其余字段（体积、作者、订阅数、简介…）在
+# `fetch_details()` 里按 ID 批量补齐 —— 那条路一直是官方 `GetPublishedFileDetails`。
+WORKSHOP_BROWSE_URL = (
+    "https://steamcommunity.com/workshop/browse/")
 
-# 排序：trend=热门 / recent=最新 / top=最多订阅
+# 排序：trend=热门 / recent=最新 / top=评分最高
 SORT_MODES = ("trend", "recent", "top")
-# 映射到 Steam QueryFiles 的排序枚举：
-#   0 = Trending（热度）  1 = MostRecent（最新）  3 = TopRated（最高评分）
-_STEAM_SORT = {"trend": 0, "recent": 1, "top": 3}
-
-# 没配 key 时的统一提示（界面直接显示这句话）
-NO_KEY_ERROR = (
-    "列表搜索需要你自己的 Steam Web API Key（设置 → 网络 → Steam API Key）。"
-    "详情和下载不需要 key，可以照常使用")
+# 网页版浏览页的 browsesort 取值（和 API 的枚举不同，这些是网页自己的名字）
+_STEAM_BROWSE_SORT = {"trend": "trend", "recent": "mostrecent", "top": "toprated"}
+# 有搜索词时的排序参数（browsesort 固定 textsearch，排序交给 searchsort）
+_STEAM_SEARCH_SORT = {"trend": "trend", "recent": "mostrecent", "top": "toprated"}
 
 # 浏览对象：mod=单件（含地图/音效等所有普通物品）/ collection=合集
 BROWSE_KINDS = ("mod", "collection")
+# 网页版用 section 区分单件与合集
+_SECTION_OF_KIND = {"mod": "readytouseitems", "collection": "collections"}
 
-# 列表接口的内存缓存：10 分钟内同样的「关键词+页+排序+类型+标签」直接本地返回
+# 列表的内存缓存：10 分钟内同样的「关键词+页+排序+类型+标签」直接本地返回
 LIST_TTL = 600.0
 _LIST_LOCK = threading.Lock()
 _LIST_CACHE: dict[tuple, tuple[float, dict]] = {}
 
-# 接口的 filetype 参数（注意：不是 Steam 物品的 file_type 字段）
-#   0 = 普通物品（单件 MOD）  1 = 合集
-_FILE_TYPE_OF_KIND = {"mod": 0, "collection": 1}
+# 卡片正则：一条工坊卡片就是 <a href="...?id=NNN"><img src="封面" alt="标题">
+_CARD_RE = re.compile(
+    r'href="https://steamcommunity\.com/sharedfiles/filedetails/\?id=(\d{5,20})"[^>]*>'
+    r'\s*<img\s+src="([^"]+)"\s+alt="([^"]*)"', re.S)
 
 
 def normalize_sort(value: object) -> str:
@@ -950,11 +957,11 @@ def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
     """拉一页工坊列表（L4D2，appid=550），带 10 分钟内存缓存。
 
     缓存的意义：切分类、点「稍后看」再点回来、来回滚列表时不该再等一次网络。
-    返回 {"ok", "items": [...], "total", "page", "error", "cached", "needKey"}。
+    返回 {"ok", "items": [...], "total", "page", "error", "cached"}。
     items 每项：{id, title, preview, author, fileType, views, subs, tags, children}
 
-    ★ `api_key` 是使用者自己的 Steam Web API Key（Steam 的列表接口强制要求）。
-      没传 key 时返回 `needKey: True` + 明确提示，不会去调任何第三方中转。
+    ★ **不需要 API Key**（走 Steam 工坊网页）。`api_key` 参数只为兼容旧调用保留，
+      传了也不用。列表只给 ID / 封面 / 标题，其余字段由调用方按 ID 批量补齐。
     """
     tag_key = tuple(normalize_tags(tags))
     key = (str(query or "").strip(), normalize_page(page),
@@ -967,11 +974,9 @@ def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
                 "items": [dict(x) for x in res.get("items", [])],
                 "total": int(res.get("total") or 0),
                 "page": int(res.get("page") or 1),
-                "error": str(res.get("error") or ""), "cached": True,
-                "needKey": False}
+                "error": str(res.get("error") or ""), "cached": True}
 
-    res = _fetch_workshop_list_net(query, page, sort, list(tag_key), kind,
-                                   timeout, api_key)
+    res = _fetch_workshop_list_net(query, page, sort, list(tag_key), kind, timeout)
     if res.get("ok"):
         with _LIST_LOCK:
             _LIST_CACHE[key] = (time.time(), {
@@ -995,105 +1000,87 @@ def clear_list_cache() -> None:
 
 def _fetch_workshop_list_net(query: str = "", page: int = 1, sort: str = "trend",
                              tags: object = None, kind: str = "mod",
-                             timeout: float = 25.0,
-                             api_key: str = "") -> dict:
-    """真正去问一次列表接口（没有缓存）—— 走 Steam 官方 QueryFiles。
+                             timeout: float = 25.0) -> dict:
+    """真正去抓一次工坊浏览页（没有缓存）—— 走 Steam 官方网页，**不需要 API Key**。
 
-    ★ 需要调用者自己的 Steam Web API Key（`api_key` 参数）。
-      没有 key 时**不发起请求**、也不回退到任何第三方服务，
-      直接返回一句明确的提示（`NO_KEY_ERROR`），界面照这句话显示。
+    抓回来的只有 ID / 封面 / 标题（网页卡片里就这些）。体积、作者、订阅数、
+    简介之类的字段由调用方按 ID 批量补齐（`fetch_details`，官方 JSON 接口）。
+
+    标签筛选的参数名必须是 **`requiredtags[]`**（带方括号）：
+    实测写成 `requiredtags`（不带括号）Steam 直接 500。
+    多个标签重复传这个参数即 AND 关系。
     """
-    key = str(api_key or "").strip()
-    if not key:
-        return {"ok": False, "items": [], "total": 0, "page": page,
-                "error": NO_KEY_ERROR, "needKey": True}
-
-    tag_list = normalize_tags(tags)
-    params = {
-        "key": key,
-        "query_type": 1,                      # 1 = ranked by vote
-        "page": normalize_page(page) - 1,      # ★ Steam 的页码从 0 开始
-        "numperpage": 30,
-        "creator_appid": 550,
-        "appid": 550,
-        # feed 决定「单件 / 合集」：0 = 普通物品，1 = 合集
-        "filetype": _FILE_TYPE_OF_KIND[normalize_kind(kind)],
-        "return_tags": "true",
-        "return_previews": "true",
-        "return_short_description": "true",
-        "return_metadata": "true",
-        "strip_description_bbcode": "false",
-        # 排序枚举：0 热度 / 1 最新 / 3 最高评分
-        "days": 7,
-    }
+    page_n = normalize_page(page)
+    kind_n = normalize_kind(kind)
+    sort_n = normalize_sort(sort)
     q = str(query or "").strip()
+
+    # 用 list of tuples 而不是 dict：标签要重复传同名参数，dict 会被覆盖
+    params: list[tuple[str, object]] = [
+        ("appid", 550),
+        ("section", _SECTION_OF_KIND[kind_n]),
+        ("numperpage", 30),
+        ("p", page_n),
+    ]
     if q:
-        params["search_text"] = q
-    if tag_list:
-        params["requiredtags"] = ",".join(tag_list)
-    # Steam 的排序既可以用 query_type，也可以用 days+sortmethod；这里用前者
-    params["query_type"] = _STEAM_SORT.get(normalize_sort(sort), 0)
+        # ★ 有关键词时 browsesort 必须是 textsearch，排序交给 searchsort。
+        #   实测：带 searchtext 但仍用 browsesort=trend，Steam 会忽略关键词、
+        #   照常返回热门列表（搜「Atlanta」也会返回 Tank 相关的东西）。
+        params.append(("browsesort", "textsearch"))
+        params.append(("searchtext", q))
+        params.append(("searchsort", _STEAM_SEARCH_SORT[sort_n]))
+    else:
+        params.append(("browsesort", _STEAM_BROWSE_SORT[sort_n]))
+        # 「热门」要配合 days 才对；最新/评分最高不带 days
+        if sort_n == "trend":
+            params.append(("days", 7))
+    for tag in normalize_tags(tags):
+        params.append(("requiredtags[]", tag))
 
     try:
-        resp = NC.get(WORKSHOP_QUERY_API, params=params,
-                      headers={"User-Agent": UA}, timeout=(5, max(8, int(timeout))))
+        resp = NC.get(WORKSHOP_BROWSE_URL, params=params,
+                      headers={"User-Agent": UA},
+                      timeout=(5, max(8, int(timeout))))
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "items": [], "total": 0, "page": page,
-                "error": f"连不上 Steam 列表接口（{type(e).__name__}）"}
+        return {"ok": False, "items": [], "total": 0, "page": page_n,
+                "error": f"连不上 Steam 工坊页面（{type(e).__name__}）"}
 
     status = int(getattr(resp, "status_code", 0) or 0)
-    if status == 403:
-        # key 无效 / 没有权限
-        return {"ok": False, "items": [], "total": 0, "page": page,
-                "error": "Steam 拒绝了请求：API Key 无效或没有权限，"
-                         "请在设置 → 网络里换一个自己的 key",
-                "needKey": True}
     if status != 200:
-        return {"ok": False, "items": [], "total": 0, "page": page,
-                "error": f"Steam 列表接口 HTTP {status}"}
-    try:
-        j = resp.json()
-    except ValueError:
-        return {"ok": False, "items": [], "total": 0, "page": page,
-                "error": "Steam 列表接口返回的不是 JSON"}
+        return {"ok": False, "items": [], "total": 0, "page": page_n,
+                "error": f"Steam 工坊页面 HTTP {status}"}
 
-    resp_obj = j.get("response") or {}
-    raw_items = (resp_obj.get("publishedfiledetails")
-                 or resp_obj.get("publishedfiledetails") or [])
-    total = int(resp_obj.get("total") or 0)
+    html = resp.text
+    cards = _CARD_RE.findall(html)
     items: list[dict] = []
-    for it in raw_items:
-        wid = str(it.get("publishedfileid") or "")
-        if not wid:
+    seen: set[str] = set()
+    for wid, cover, alt in cards:
+        if wid in seen:
             continue
-        tags_out = []
-        for t in (it.get("tags") or []):
-            if isinstance(t, dict):
-                tag = str(t.get("tag") or "").strip()
-                if tag:
-                    tags_out.append(tag)
-        subs = it.get("subscriptions")
-        try:
-            subs_n = int(subs or 0)
-        except (TypeError, ValueError):
-            subs_n = 0
-        try:
-            children = int(it.get("num_children") or 0)
-        except (TypeError, ValueError):
-            children = 0
+        seen.add(wid)
         items.append({
             "id": wid,
-            "title": (it.get("title") or "").strip(),
-            "preview": it.get("preview_url") or "",
-            "author": str(it.get("creator") or ""),
-            "fileType": int(it.get("file_type") or 0),
-            "views": int(it.get("views") or 0),
-            "subs": subs_n,
-            "favorited": int(it.get("favorited") or 0),
-            "children": children,
-            "created": int(it.get("time_created") or 0),
-            "updated": int(it.get("time_updated") or 0),
-            "tags": tags_out,
+            "title": _html_mod.unescape(alt or "").strip(),
+            "preview": cover.replace("&amp;", "&"),
+            # 网页卡片里没有这些，留给 fetch_details 按 ID 补
+            "author": "",
+            "fileType": 2 if kind_n == "collection" else 0,
+            "views": 0,
+            "subs": 0,
+            "favorited": 0,
+            "children": 0,
+            "created": 0,
+            "updated": 0,
+            "tags": [],
         })
-    return {"ok": True, "items": items, "total": total,
-            "page": normalize_page(page), "error": ""}
+
+    if not items:
+        # 空结果不一定是错：搜到 0 条时页面就是没有卡片
+        return {"ok": True, "items": [], "total": 0, "page": page_n, "error": ""}
+
+    # ★ 网页版**不给总数**（翻页只靠「下一页」链接）。
+    #   曾经用 `of N` 去抓，结果匹配到游戏简介里的
+    #   「#1 co-op game of 2008」，算出个恒定的 2008 —— 已删掉那段正则。
+    #   前端需要总量的地方改用「是否拿到满一页」判断还有没有下一页。
+    return {"ok": True, "items": items, "total": 0,
+            "page": page_n, "error": "", "hasMore": len(items) >= 30}

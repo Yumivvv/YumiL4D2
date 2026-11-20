@@ -2270,48 +2270,11 @@ class Core(QObject):
         return m
 
     # ---------------------------------------------------------------- Steam API Key
-    # 只有「工坊列表 / 搜索」需要它（Steam 的 QueryFiles 强制要 key）。
-    # 详情、下载、合集展开都不需要，所以这里做成「可选、随时能清空」。
-    # 存本地 config.json，不进仓库、不上传。
-    @Property(str, notify=statusChanged)
-    def steamApiKey(self) -> str:
-        """当前保存的 key（给输入框回显用）。"""
-        return str(self.config["steam_api_key"] or "")
-
-    @Property(bool, notify=statusChanged)
-    def hasSteamApiKey(self) -> bool:
-        return bool(str(self.config["steam_api_key"] or "").strip())
-
-    # 输入框里正在编辑、还没点「保存」的草稿（避免每敲一个字符就落盘）
-    _steam_key_draft = ""
-
-    @Slot(str)
-    def setSteamApiKeyDraft(self, text: str) -> None:
-        """记下输入框的草稿（不落盘，等用户点保存）。"""
-        self._steam_key_draft = str(text or "").strip()
-
-    @Slot()
-    def saveSteamApiKey(self) -> None:
-        """把草稿写进配置（点「保存」时调）。"""
-        key = str(getattr(self, "_steam_key_draft", "") or "").strip()
-        self.config["steam_api_key"] = key
-        self.config.save()
-        if key:
-            self._set_status("已保存 Steam API Key，工坊列表可以用了")
-            self.toast("已保存 Steam API Key", "ok")
-        else:
-            self._set_status("API Key 是空的，工坊列表仍然不可用")
-            self.toast("Key 是空的，没有保存", "warn")
-        self.statusChanged.emit()
-
-    @Slot()
-    def clearSteamApiKey(self) -> None:
-        self._steam_key_draft = ""
-        self.config["steam_api_key"] = ""
-        self.config.save()
-        self._set_status("已清空 Steam API Key")
-        self.toast("已清空 Steam API Key", "info")
-        self.statusChanged.emit()
+    # ★ 2026-11 已彻底移除。
+    #   工坊列表/搜索改成抓 Steam 工坊网页（steamcommunity.com/workshop/browse/），
+    #   那个页面不需要 key；详情、下载、合集展开本来也不用 key。
+    #   因此设置里不再有这一栏，config 里的 steam_api_key 也不再被读取
+    #   （老配置里残留的那个空串不影响任何东西）。
 
     @Slot("QVariantMap")
     def openPanLink(self, link: dict) -> None:

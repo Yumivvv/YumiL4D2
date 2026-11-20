@@ -99,11 +99,10 @@ def main() -> int:
     if page is None or grid is None:
         return 1
 
-    # ★ 工坊列表现在走 Steam 官方 QueryFiles，**必须带用户自己的 API Key**。
-    #   测试机通常没填 key，那时列表会是空的 —— 这不是「滚动坏了」，
-    #   而是「没有数据源」。所以这里直接塞一批假数据进 browseItems，
-    #   让本测试专注验证它真正要验的东西：滚动位置不被重置。
-    #   （「没 key 时给出明确提示」由 round26/test 覆盖，不在这里断言。）
+    # ★ 列表现在走 Steam 工坊网页，**不需要 API Key**，所以正常情况下能真拉到数据。
+    #   只有网络不通（列表为空）时才塞假数据，让本测试专注验证它要验的东西：
+    #   滚动位置不被重置 —— 而不是「有没有网」。
+    injected_fake = False
     if not mgr.browseItems:
         fake = [{"id": str(3842272870 + i),
                  "title": "假数据 MOD %d" % i,
@@ -116,7 +115,8 @@ def main() -> int:
         mgr._browse_done = False
         mgr.browseChanged.emit()
         spin(400)
-        print("  （没有 API Key，注入 %d 条假数据来验滚动）" % len(fake), flush=True)
+        injected_fake = True
+        print("  （列表拉不到，注入 %d 条假数据来验滚动）" % len(fake), flush=True)
 
     waited = 0
     while waited < 30000 and not mgr.browseItems:
@@ -143,9 +143,9 @@ def main() -> int:
     else:
         print("      （这一页还不够长，A/B 两种情况都验证一下）")
 
-    # ★ 没有 key 时 browseMore() 也拉不到新数据，这里同样用本地追加来模拟
-    #   「后端又送来一页」，专注验证滚动位置不被打回顶部。
-    if not mgr.hasSteamApiKey:
+    # ★ 用真实的「往下加载下一页」路径（browseMore），这正是本用例要验的行为。
+    #   只有拿不到数据（网络不通）时才退回本地追加。
+    if injected_fake:
         extra = [{"id": str(3842290000 + i),
                   "title": "假数据 MOD 追加 %d" % i,
                   "preview": "", "author": "test", "fileType": 0,
@@ -155,10 +155,10 @@ def main() -> int:
         mgr._browse_thumbs = [""] * len(mgr._browse_items)
         mgr.browseAppended.emit()
         mgr.browseChanged.emit()
-        print("  （没有 API Key，本地追加 %d 条模拟下一页）" % len(extra),
-              flush=True)
+        print("  （本地追加 %d 条模拟下一页）" % len(extra), flush=True)
     else:
         mgr.browseMore()
+        print("  （走真实 browseMore 拉下一页）", flush=True)
     waited = 0
     while waited < 30000 and len(mgr.browseItems) <= first_count:
         spin(250)
