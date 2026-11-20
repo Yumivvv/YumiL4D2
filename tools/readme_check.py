@@ -1,140 +1,84 @@
-"""README 结构体检：代码块配对、重复段落、失效的旧文案。"""
+"""文档体检：README 保持精简，技术长文在 docs/DEVELOPMENT.md。
+
+README 现在只放简介 / 安装 / 使用 / 致谢，篇幅要可控；
+原来的逐条实现说明已整体迁到 docs/DEVELOPMENT.md，那份继续做内容完整性检查。
+"""
 import os
 import re
-import sys
 from collections import Counter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-path = os.path.join(ROOT, "README.md")
-text = open(path, encoding="utf-8").read()
+readme = os.path.join(ROOT, "README.md")
+devdoc = os.path.join(ROOT, "docs", "DEVELOPMENT.md")
+
+text = open(readme, encoding="utf-8").read()
+dev = open(devdoc, encoding="utf-8").read()
 
 fence = "`" * 3
-n = text.count(fence)
-print("code fences:", n, "even?" , n % 2 == 0)
-assert n % 2 == 0, "代码块没配对"
+for name, body in (("README.md", text), ("docs/DEVELOPMENT.md", dev)):
+    n = body.count(fence)
+    print(f"{name} 代码块数: {n} 偶数? {n % 2 == 0}")
+    assert n % 2 == 0, f"{name} 代码块没配对"
 
-paras = [p.strip() for p in re.split(r"\n\s*\n", text) if len(p.strip()) > 60]
-dups = {k: v for k, v in Counter(paras).items() if v > 1}
-print("duplicate paragraphs:", len(dups))
-for k, v in list(dups.items())[:5]:
-    print(f"  x{v}: {k[:70]}")
-assert not dups, "README 里有重复段落"
+for name, body in (("README.md", text), ("docs/DEVELOPMENT.md", dev)):
+    paras = [p.strip() for p in re.split(r"\n\s*\n", body) if len(p.strip()) > 60]
+    dups = {k: v for k, v in Counter(paras).items() if v > 1}
+    print(f"{name} 重复段落: {len(dups)}")
+    assert not dups, f"{name} 里有重复段落"
 
-# 旧文案不该再出现。
-# 注意「组合（一键切换）」「共扫描」是刻意留在「已删除/已改掉」那两句说明里的，
-# 所以这里只查那些**不该以原样出现**的按钮/标签文案。
-stale = [
-    "检查这个 MOD",
-    "禁用这个 MOD",
-    "启用这个 MOD",
-    "重新检查这个 MOD",
-    "· 共扫描 ",
-    # 背景图现在只留一个 background.*，不该再宣传「点图片名切换多张图」
-    "| 点图片名 |",
+# ---- README 要精简 ----
+n_lines = len(text.splitlines())
+n_kb = len(text.encode("utf-8")) / 1024
+print(f"\nREADME 篇幅: {n_lines} 行 / {n_kb:.1f} KB")
+assert n_lines < 200, f"README 太长了（{n_lines} 行），技术细节请放 docs/DEVELOPMENT.md"
+
+# ---- README 必须有的东西 ----
+need_readme = [
+    "Yumi的L4D2工具箱",
+    # 三块功能
+    "视频监控", "MOD 管理器", "服务器",
+    # 致谢（issue #1 的要求）
+    "致谢", "LytVPK", "LaoYutang", "lytvpk",
+    "issue #1",
+    "工坊浏览", "加载顺序", "更新检查", "CDN 优选",
+    "工坊 DNS", "兜底 IP",
+    "独立实现",
+    # 安装 / 使用
+    "快速开始", "启动.cmd", "打包成独立 exe", "98–99 MB",
+    "系统要求", "Python 3.10+",
+    "快捷键", "常见问题",
+    # 指向长文
+    "docs/DEVELOPMENT.md",
+    # 隐私与许可
+    "数据与隐私", "Steam API Key", "GPL-3.0",
 ]
-for s in stale:
-    if s in text:
-        print("  [stale]", s)
-        assert False, f"README 里还有旧文案：{s}"
-
-# 新东西应该出现
-need = ["今日扫描", "置顶评论", "音量与静音", "右下角", "检查MOD", "转换到本地MOD",
-        "自定义主题色", "主题色", "自定义背景图",
-        # 本轮新增
-        "外观模式", "跟随系统", "夜间", "日间",
-        "分享视频", "最近导入", "按导入日期筛选", "background",
-        # 创意工坊导入
-        "创意工坊导入", "订阅", "前置物品", "下载线程",
-        "合集", "重新下载",
-        # 加载顺序
-        "加载顺序", "addonlist", "GBK", "文件不存在",
-        # VPK 内部解析
-        "VPK 内部解析", "addoninfo.txt", "addonimage.jpg", "目录树",
-        # 创意工坊页 / CDN / 翻译
-        "创意工坊页", "CDN 加速", "SNI", "简介与翻译", "MyMemory",
-        "浏览", "QueryFiles",
-        # 本轮：工坊页改版 + 网络加速
-        "网络加速", "自动优选", "手动指定", "地名", "稍后看",
-        "连前置一起下", "滚轮", "封面代理",
-        # 本轮：加速与 DNS 分开
-        "工坊 DNS", "腾讯 DNS", "阿里 DNS", "使用系统 DNS", "IPv4", "IPv6",
-        # 本轮：工坊详情提速 / 合集判据 / 不跳回顶部
-        "file_type", "num_children", "lite 快通道", "COLLECT_FAST_LIMIT",
-        "直链在下载时解析", "先列前", "ListModel", "positionViewAtBeginning",
-        "ws_scroll_test",
-        # 本轮：下载命名 / 下完补封面 / 删除立刻刷新 / 无前置不提示
-        "创意工坊 ID", "modmeta.json", "modcache", "_after_download",
-        "_forget_paths", "showDepRow", "mod_delete_test",
-        # 本轮：详情接口白送的 CDN 直链
-        "file_url", "direct_file_url", "多文件", "_expand_collections",
-        # 本轮：没前置就不出现那一行 + 手动「检查前置」
-        "检查前置", "复查前置",
-        # 本轮：简介（BBCode 清洗）+ 翻译挪到详情里手动翻
-        "description", "_plain_desc", "译成中文", "看原文",
-        # 本轮：合集成员全列出来（流式补齐）+ 稍后看不再卡
-        "workshopMembersChanged", "stop_streaming", "syncLaterModel",
-        "memberItems", "已列出", "移除", "清空",
-        # 本轮：多封面 / 统计数字 / 返回合集 / 重复成员 / 更新检查
-        "多张封面", "缩略图条", "_desc_images", "requestWorkshopStats",
-        "workshopStatsChanged", "detailStack", "重复", "time_updated",
-        "mod_update_test",
-        # 本轮：滚轮防穿透补全 + 加载顺序（滚动条配色 / 关掉不留进度 / 禁用标签）
-        "滚动条", "resetAddonOrderState", "fileDisabled", "禁用",
-        # 本轮：视频详情空间预算 + 分享文案带作者和日期
-        "linkBudget", "发布日期", "UP：",
-        # 本轮：滚动条拖到底（手写 ScrollBar 的 position 换算）
-        "dragRange", "contentFromPos", "scroll_drag_test", "可拖行程",
-        # 本轮：打包说明（spec 路径要从 SPECPATH 推算）
-        "视频库上限", "video_limit",
-        "打包成独立 exe", "SPECPATH", "Yumi的L4D2工具箱.exe",
-        # 本轮：单文件 exe（数据落在 exe 旁边、首运行建目录、瘦身）
-        "98–99 MB", "USER_ROOT", "seed_user_dirs", "单文件", "_MEIPASS",
-        "Qt6WebEngineCore.dll", "onefile_paths_test", "build_folder.spec",
-        # 本轮：只看新的自动关 / 稍后看里点分类 / 日韩翻译 / 统计两行
-        "只看新的", "detect_lang", "langpair", "假名", "谚文",
-        "statDateChips", "ElideRight",
-        # 本轮：服务器页（A2S 直查 / 收藏 / 直连）
-        "A2S", "steam://connect/", "connect ip:port", "m:coop",
-        # 地图中文名现在走内置表（原来那条第三方地图接口已移除，见「致谢」）
-        "_BUILTIN_MAPS", "hl2master.steampowered.com", "challenge",
-        "servers_test", "parse_mode",
-        # 本轮：服务器表单（名称/权重/多面板/DPAPI 密码）+ IP 直连 + 编辑
-        "添加服务器", "IP 直连", "排序权重", "面板地址", "DPAPI",
-        "CryptProtectData", "saveServer", "serverDetail", "clearPasswords",
-        "parseAddress", "z: 2", "IP 直连（不进收藏）",
-        # 本轮：搜索（排序同一行 / 分词 / Ctrl+F / 没匹配空状态）
-        "和排序同一行", "都要命中", "Ctrl+F",
-        # 本轮：统一下载页（队列 / 进度 / 取消 / 重试 / 左下角入口）
-        "下载页", "_after_mod_done", "协作式", "Ctrl+J",
-        "进行中的数量", "清空已结束",
-        # 本轮：工坊下载交给下载页（不再「一直显示处理中」）+ 进服务器页自动刷新
-        "一直显示处理中", "会自动刷新一次", "防抖",
-        # 本轮：任务栏最小化 / 窗口按钮统一 / 蓝奏云直链 / 线程上限 / 视频缓存删除 /
-        #       色盘 / 服务器元数据字体
-        "WindowMinimizeButtonHint", "WindowButtons", "winButtonsReserve",
-        "蓝奏云可以直接下载", "ajaxfile.php", "1 / 2 / 3 / 4 / 6 / 8 / 12 / 16",
-        "视频缓存」这一格已经删掉了", "putImageData", "Consolas",
-        "按内容分字体",
-        # 本轮：设置残留关闭按钮 / 工坊多图 / 工坊 DNS 主题色 / 设置排版
-        "残留关闭按钮", "多张图只加载出封面", "四个分区", "② 外观与主题",
-        "Property value set multiple times",
-        # 本轮：蓝奏云直链（四条硬要求 / 实测结果）
-        "四条硬要求", "acw_sc__v2", "apifile.woozooo.com", "ajaxfile.php",
-        "X-FORWARDED-FOR", "down_ip=1", "_NoRedirect", "Location",
-        "文件未授权", "wp_sign", "isngis", "clean_lanzou_url",
-        "文件夹分享", "13 条真实链接",
-        # 本轮：点本地下载没反应（槽签名写错 → 静默失败）
-        "点本地下载没反应", "QVariantMap", "静默失败", "addPanFile",
-        # 本轮：压缩包一键导入 MOD
-        "压缩包一键导入 MOD", "importTaskArchive", "inspectTaskArchive",
-        "bsdtar + libarchive", "同名文件按既有规则不覆盖",
-        "archive_import_test",
-        # 本轮：换背景图无效 / 服务器配置导入导出 / MOD 简介翻译
-        "换了背景图但画面没变", "_bg_version",
-        "导出 / 导入配置（分享给朋友）", "★ 面板密码绝不导出",
-        "只加不删", "previewImport", "简介可以译成中文", "看原文 / 看译文"]
-for s in need:
-    assert s in text, f"README 缺少新内容：{s}"
+for s in need_readme:
+    assert s in text, f"README 缺少：{s}"
     print("  ok:", s)
 
-print("\nREADME 体检通过")
+# ---- 不该再出现的旧说法 ----
+stale = [
+    "项目自带的中转站",
+    "项目自带中转站",
+    "可以照做",
+]
+for s in stale:
+    assert s not in text, f"README 里还有旧说法：{s}"
+
+# ---- 技术长文该在的东西（抽查关键项，确保没在拆分中丢内容）----
+need_dev = [
+    "一、视频监控", "二、MOD 管理器", "缓存与空间",
+    "addonlist", "GBK", "VPK 内部解析", "addoninfo.txt",
+    "工坊 DNS", "网络加速", "SNI", "QueryFiles",
+    "file_url", "direct_file_url", "COLLECT_FAST_LIMIT",
+    "A2S", "steam://connect/", "DPAPI",
+    "蓝奏云", "acw_sc__v2", "X-FORWARDED-FOR",
+    "_BUILTIN_MAPS", "onefile_paths_test", "Qt6WebEngineCore.dll",
+    "USER_ROOT", "_MEIPASS", "SPECPATH",
+    "常见问题", "跑测试",
+]
+missing = [s for s in need_dev if s not in dev]
+assert not missing, f"docs/DEVELOPMENT.md 缺内容：{missing}"
+print(f"\ndocs/DEVELOPMENT.md 关键内容齐全（{len(need_dev)} 项抽查通过）")
+
+print("\n文档体检通过")
