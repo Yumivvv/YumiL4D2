@@ -749,11 +749,17 @@ class WorkshopClient:
     def author_name(self, steamid: str) -> str:
         """SteamID → Steam 昵称，取不到就返回空串（调用方显示 SteamID）。
 
-        工坊接口只给 creator 的 64 位 SteamID，昵称得另外查。三条路都试：
-          1. 本地缓存（一次性查过就不再来回请求）
-          2. steamcommunity.com/profiles/<id>/?xml=1（国内经常被重置）
-          3. steamid.io/lookup/<id>（第三方，页面底部有 add <昵称> to your Steam friends）
+        工坊接口只给 creator 的 64 位 SteamID，昵称得另外查。两条路：
+          1. 本地缓存（查过就不再来回请求）
+          2. steamcommunity.com/profiles/<id>/?xml=1（**Steam 自家域名**，无需 key）
         哪条成功就把结果记下来，失败也记一笔（24 小时内不重复撞墙）。
+
+        ★ 2026-11 变更：原来还有一条 `steamid.io` 第三方兜底，已**删除**。
+          那是外部站点，而本项目对外只依赖 Steam 自己的服务。
+          官方 `ISteamUser/GetPlayerSummaries` 能替代它，但**强制要求 Steam API Key**
+          （实测无 key 直接 400 "Required parameter 'key' is missing"，
+          假 key 是 403），不配 key 的机器上等于不可用，所以没接进这条链。
+          XML 这条拿不到昵称时，UI 就显示 SteamID —— 不为了一个昵称去请求第三方站。
         """
         sid = str(steamid or "").strip()
         if not sid.isdigit():
@@ -766,7 +772,7 @@ class WorkshopClient:
         if hit and int(hit.get("checked_at") or 0) > time.time() - 86400:
             return ""
 
-        name = self._fetch_author_community(sid) or self._fetch_author_steamidio(sid)
+        name = self._fetch_author_community(sid)
         entry = {"name": name or "", "checked_at": int(time.time())}
         with self._author_lock:
             self._authors[sid] = entry
@@ -815,24 +821,6 @@ class WorkshopClient:
                 return html.unescape(m.group(1)).strip()
         except Exception as e:  # noqa: BLE001
             log(f"author community lookup failed {sid}: {e.__class__.__name__}")
-        return ""
-
-    @staticmethod
-    def _fetch_author_steamidio(sid: str) -> str:
-        url = f"https://steamid.io/lookup/{sid}"
-        try:
-            r = requests.get(url, timeout=(6, 15), headers={"User-Agent": UA})
-            if r.status_code != 200:
-                return ""
-            # 页面底部那颗「add 昵称 to your Steam friends」按钮里就是最近的昵称
-            m = re.search(r'title="add (.+?) to your Steam friends"', r.text)
-            if m:
-                name = html.unescape(m.group(1)).strip()
-                # 明显不是昵称的（按钮文案被本地化过）就放弃
-                if name and "Steam" not in name and len(name) <= 64:
-                    return name
-        except Exception as e:  # noqa: BLE001
-            log(f"author steamid.io lookup failed {sid}: {e.__class__.__name__}")
         return ""
 
 

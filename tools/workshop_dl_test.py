@@ -92,28 +92,35 @@ def main() -> int:
         check(f"clamp_threads({raw!r})", W.clamp_threads(raw) == expect,
               str(W.clamp_threads(raw)))
 
-    # ---------------------------------------------------------------- 3. 页面解析
-    print("=== 3. 下载站页面解析 ===")
-    page = (
-        "<b><a href='https://cdn.steamusercontent.com/ugc/119/ABC/' "
-        "title='【测试】狂三 替换 Zoey'>Download: 【测试】狂三 替换 Zoey</a> [Left 4 Dead 2]<br>"
-        "<div class='short-story'><a href='https://images.steamusercontent.com/x.jpg' "
-        "target='_blank'><img src='x'></a><br>Size: 23.7MB<br>Views: 880<br>"
-        "Subscribers: 211<br></div><br>Filename: 时崎狂三 替换 zoey.vpk</td>"
-    )
-    info = W._parse_download_page(page)
-    check("解析出直链", info["url"] == "https://cdn.steamusercontent.com/ugc/119/ABC/",
-          info["url"])
-    check("解析出标题", info["title"] == "【测试】狂三 替换 Zoey", info["title"])
-    check("解析出体积", info["size"] == int(23.7 * 1024 * 1024), str(info["size"]))
-    check("解析出体积文本", info["sizeText"] == "23.7MB", info["sizeText"])
-    check("解析出文件名", info["filenameOnSite"] == "时崎狂三 替换 zoey.vpk",
-          info["filenameOnSite"])
-    # 封面在真实页面里是 CSS 的 background:url(...) 形式，不是 <img>
-    cover_page = ("<img src='x' style=\"background:url("
-                  "https://images.steamusercontent.com/ugc/115/04087.jpg) no-repeat;\">")
-    check("解析出封面", "images.steamusercontent.com" in
-          W._parse_download_page(cover_page)["preview"])
+    # ------------------------------------------------- 3. 官方直链判据
+    print("=== 3. 官方 file_url 判据（不再有下载站）===")
+    CDN = "https://cdn.steamusercontent.com/ugc/119/ABC/"
+    # 能下的：单文件 vpk
+    check("单文件 .vpk 可用", W._direct_url_ok(CDN, "时崎狂三 替换 zoey.vpk"))
+    # filename 带上传目录前缀（myl4d2addons/xxx.vpk）也认 —— 实测这类条目
+    # 的 file_url 就是完整 VPK，Content-Length 与 file_size 吻合
+    check("带目录前缀的 .vpk 可用", W._direct_url_ok(CDN, "myl4d2addons/root.vpk"))
+    check("反斜杠目录也认", W._direct_url_ok(CDN, "myl4d2addons\\root.vpk"))
+    # 不能下的：封面图域名 / 非 vpk / 空
+    check("images 域名（封面图）不算",
+          not W._direct_url_ok(
+              "https://images.steamusercontent.com/ugc/1/2.jpg", "a.vpk"))
+    check("zip 打包条目不算", not W._direct_url_ok(CDN, "L4N_v2.51.0.zip"))
+    check("空文件名不算", not W._direct_url_ok(CDN, ""))
+    check("空地址不算", not W._direct_url_ok("", "a.vpk"))
+
+    # 目录前缀在落盘时必须被取掉（不能真去建 myl4d2addons 子目录）
+    check("落盘取 basename", W._safe_filename("myl4d2addons/root.vpk") == "root.vpk",
+          W._safe_filename("myl4d2addons/root.vpk"))
+
+    # 下载站相关符号应该已经彻底不存在
+    for gone in ("DL_SITE", "DL_VIEW", "_parse_download_page", "_size_to_bytes"):
+        check(f"已删除 {gone}", not hasattr(W, gone))
+    import inspect as _insp
+    src = _insp.getsource(W)
+    check("源码里不再有下载站地址",
+          "http://steamworkshop.download" not in src
+          and "https://steamworkshop.download" not in src)
 
     # ---------------------------------------------------------------- 4. 依赖解析
     print("=== 4. 必需物品（前置）解析 ===")
@@ -162,7 +169,7 @@ def main() -> int:
         print(f"      依赖检查：{'已检查' if real.get('depsChecked') else '未查成'}"
               f" {real.get('depsReason') or ''}")
     else:
-        print("      [skip] 下载站暂时不可用：", real.get("error"))
+        print("      [skip] 官方接口暂时不可用：", real.get("error"))
 
     bad = d.probe("这不是ID")
     check("垃圾输入被拒", bad.get("ok") is False and "认不出" in (bad.get("error") or ""),

@@ -40,9 +40,12 @@ VPK 解析、A2S 查询、网盘链接提取、B 站登录、下载器为独立�
 > 在对方提出后已**全部移除**（见 [issue #1](https://github.com/Yumivvv/YumiL4D2/issues/1)）。
 > 现在工坊数据全部直连 Steam 官方 API，地图名与 CDN 节点用内置表。
 >
-> 其余会联网的地方是公开、免费、无需注册的第三方站点 ——
-> 下载站 `steamworkshop.download`、翻译接口 MyMemory / 腾讯交互翻译、
-> 以及 B 站自己的网页与接口。它们与 LytVPK 无关。
+> 其余会联网的地方只有**公开、免费、无需注册**的第三方站点 ——
+> 翻译接口 MyMemory / 腾讯交互翻译、以及 B 站自己的网页与接口。
+> 它们与 LytVPK 无关。
+>
+> 创意工坊的**列表、搜索、详情、下载、合集展开**全部直连 Steam 官方 API，
+> 不使用任何第三方下载站。
 
 **关于 Steam API Key**：只有「工坊列表 / 搜索」需要你自己的 key
 （Steam 的 `QueryFiles` 接口强制要求），到

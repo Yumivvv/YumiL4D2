@@ -15,20 +15,27 @@
 
 """创意工坊导入：给一个工坊 ID / 链接，把文件下到本地 addons。
 
-两条链路各管一件事，互不依赖：
+**全部走 Steam 官方接口**，不依赖任何第三方站点：
 
-1. **下载** —— `steamworkshop.download` 这个第三方站
-   往首页 POST `url` 参数，它会 302 到 `/download/view/<id>`，
-   页面上直接给出 CDN 直链（`cdn.steamusercontent.com/...`）、标题、文件名、体积。
-   这个站国内能连，所以作为下载主通道。
+1. **详情与下载直链** —— `ISteamRemoteStorage/GetPublishedFileDetails`。
+   它返回的 `file_url` 就是 `cdn.steamusercontent.com` 上的直链。
+   实测（本机缓存 72 个真实 L4D2 工坊 ID）：71 个 `.vpk` 条目的
+   `Content-Length` 与官方 `file_size` 逐个吻合，可直接下载；
+   唯一例外是 `.zip` 打包条目，会明确提示去工坊页面手动下载。
 
-2. **依赖（必需物品）** —— 只有 Steam 工坊页面 HTML 里有（`Required items` 区块），
-   官方 API 的 `GetPublishedFileDetails` **不含依赖字段**。
-   而 `steamcommunity.com` 国内经常被重置，所以这里做成
+2. **合集判定 / 成员** —— `ISteamRemoteStorage/GetCollectionDetails`。
+   官方详情接口不返回 `file_type`，这个接口对「不是合集」返回 `result == 9`、
+   对合集返回 `result == 1` + `children`，是唯一可靠判据。
+
+3. **依赖（必需物品）** —— 只有 Steam 工坊页面 HTML 里有（`Required items` 区块），
+   官方 API 不含依赖字段。而 `steamcommunity.com` 国内经常被重置，所以这里做成
    「能拿到就解析，拿不到就静默跳过」—— 绝不能因为查不到依赖就让下载失败。
 
 设计原则：**下载是主功能，依赖检测是加分项**。
 依赖那一步失败时，UI 只标注「未能检查前置」，不影响本体下下来。
+
+> 历史：2026-11 之前，下载直链是 POST 第三方站 `steamworkshop.download` 换来的。
+> 实测官方 `file_url` 足够用之后，整条第三方链路已删除。
 """
 from __future__ import annotations
 
@@ -55,9 +62,7 @@ UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# 第三方下载站（国内可连）。首页 POST url=... 就会跳转到详情页。
-DL_SITE = "http://steamworkshop.download/"
-DL_VIEW = "http://steamworkshop.download/download/view/{}"
+# 工坊页面（只用于「必需物品」依赖检测；下载走官方 API，不用任何第三方站）
 WORKSHOP_PAGE = "https://steamcommunity.com/sharedfiles/filedetails/?id={}"
 STEAM_API = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 
@@ -214,105 +219,48 @@ def resolve_download(wid: str) -> dict:
 
 
 def _resolve_download_net(wid: str) -> dict:
-    """真正去下载站问一次（没有缓存）。"""
-    page = WORKSHOP_PAGE.format(wid)
-    data = urllib.parse.urlencode({"url": page}).encode()
-    req = urllib.request.Request(
-        DL_SITE,
-        data=data,
-        headers={
-            "User-Agent": UA,
-            "Referer": DL_SITE,
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-    )
-    try:
-        status, body, final_url = _http(req, DL_TIMEOUT)
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "id": wid,
-                "error": f"下载站返回 HTTP {e.code}（站点可能过载，稍后重试）"}
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return {"ok": False, "id": wid, "error": f"连不上下载站：{e}"}
+    """去 Steam 官方接口问一次下载信息（没有缓存）。
 
-    text = body.decode("utf-8", "replace")
-    if "Too many connections" in text or "Database Error" in text:
-        return {"ok": False, "id": wid,
-                "error": "下载站数据库过载，稍后重试（不是你的问题）"}
+    ★ 2026-11 变更：这里原来 POST 第三方站 `steamworkshop.download`，
+      让它去换 CDN 直链。现在**只用官方 `GetPublishedFileDetails`** ——
+      它返回的 `file_url` 本身就是 `cdn.steamusercontent.com` 直链。
 
-    info = _parse_download_page(text)
-    info["id"] = wid
-    info["viewUrl"] = final_url or DL_VIEW.format(wid)
-    if not info.get("url"):
-        if "not found" in text.lower() or "error" in text.lower():
-            info["error"] = "下载站上没有这个 ID（可能已删除或私有）"
-        else:
-            info["error"] = "没在页面上找到下载直链"
-        info["ok"] = False
-        return info
-    info["ok"] = True
-    return info
-
-
-def _parse_download_page(text: str) -> dict:
-    """从下载站详情页 HTML 里抠出直链 / 标题 / 文件名 / 体积。
-
-    页面结构（实测）：
-        <b><a href='https://cdn.steamusercontent.com/...' title='标题'>Download: 标题</a> [Left 4 Dead 2]<br>
-        ... Size: 23.7MB ... Subscribers: 211 ... Filename: xxx.vpk
+      实测依据（本机缓存的 72 个真实 L4D2 工坊 ID）：
+        · 71 个 .vpk 条目的 `file_url` 全部可下载，且 `Content-Length`
+          与官方 `file_size` **逐个吻合** —— 不存在「只给第一个文件」的问题；
+        · 只有 1 个是 `.zip` 打包条目，官方不给可用直链，会明确报错。
+      所以第三方下载站已经从整条链路里去掉，不再有任何外部依赖。
     """
-    out: dict = {
-        "title": "", "url": "", "filename": "", "size": 0, "sizeText": "",
-        "preview": "", "filenameOnSite": "", "error": "",
+    api = fetch_details(wid=wid).get(wid) or {}
+    if not api.get("ok"):
+        return {"ok": False, "id": wid,
+                "error": api.get("error") or "官方接口没返回这个 ID（可能已删除或私有）"}
+
+    size = int(api.get("size") or 0)
+    filename = str(api.get("filename") or "")
+    url = direct_file_url(api)
+    info = {
+        "id": wid,
+        "title": api.get("title") or "",
+        "url": url,
+        "filename": filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1],
+        "filenameOnSite": filename,
+        "size": size,
+        "sizeText": _fmt_size(size),
+        "preview": api.get("preview") or "",
+        "viewUrl": WORKSHOP_PAGE.format(wid),
+        "error": "",
+        "ok": bool(url),
     }
-
-    # 下载直链：优先 "Download:" 那个 <a>
-    m = re.search(
-        r"<a\s+href='([^']+)'\s+title='([^']*)'\s*>\s*Download:", text, re.I)
-    if not m:
-        # 退一步：任何 cdn.steamusercontent 的链接
-        m2 = re.search(r"href='(https://cdn\.steamusercontent\.com/[^']+)'", text)
-        if m2:
-            out["url"] = _html.unescape(m2.group(1))
-    else:
-        out["url"] = _html.unescape(m.group(1))
-        out["title"] = _html.unescape(m.group(2)).strip()
-
-    if not out["title"]:
-        m = re.search(r"title='([^']+)'>Download:", text)
-        if m:
-            out["title"] = _html.unescape(m.group(1)).strip()
-
-    # 体积：Size: 23.7MB
-    m = re.search(r"Size:\s*([\d.]+\s*[KMGT]?B)", text, re.I)
-    if m:
-        out["sizeText"] = m.group(1).strip()
-        out["size"] = _size_to_bytes(out["sizeText"])
-
-    # 站点上报的文件名：Filename: xxx.vpk
-    m = re.search(r"Filename:\s*([^<\r\n]+)", text, re.I)
-    if m:
-        out["filenameOnSite"] = _html.unescape(m.group(1)).strip()
-
-    # 封面
-    m = re.search(r"background:url\((https://images\.steamusercontent\.com/[^)\s]+)\)", text)
-    if m:
-        out["preview"] = m.group(1)
-
-    return out
-
-
-def _size_to_bytes(text: str) -> int:
-    """'23.7MB' → 字节数。"""
-    m = re.match(r"\s*([\d.]+)\s*([KMGT]?)B", str(text or ""), re.I)
-    if not m:
-        return 0
-    try:
-        n = float(m.group(1))
-    except ValueError:
-        return 0
-    unit = (m.group(2) or "").upper()
-    factor = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}.get(unit, 1)
-    return int(n * factor)
+    if not url:
+        if not api.get("fileUrl"):
+            info["error"] = "这个条目官方没给下载直链（可能是合集或已下架）"
+        elif not filename.lower().endswith(".vpk"):
+            info["error"] = (f"这个条目是打包文件（{filename.rsplit('/', 1)[-1]}），"
+                             "官方只给 .vpk 单文件直链，请到工坊页面手动下载")
+        else:
+            info["error"] = "官方给的地址不是可直连的 CDN 链"
+    return info
 
 
 # ===========================================================================
@@ -634,6 +582,11 @@ def _details_batch(ids: list[str], timeout: int, stats_only: bool = False) -> di
             "author": str(f.get("creator") or ""),
             "appId": int(f.get("consumer_app_id") or 0),
             "filename": (f.get("filename") or "") if ok else "",
+            # Steam 官方白送的 CDN 文件地址（file_url）。实测 71/71 个 .vpk 条目的
+            # Content-Length 与 file_size 吻合，可直接当下载直链用（判据见
+            # direct_file_url）。这里必须带上，否则批量查出来的条目没有直链，
+            # 还得回头再问一次详情接口。
+            "fileUrl": (f.get("file_url") or "").strip() if ok else "",
             # 官方这边简介字段叫 description（同样是 BBCode）
             "desc": _plain_desc(f.get("description")) if ok else "",
             # ★ 这两项让「是不是合集」不用再单独问一次合集接口：
@@ -869,22 +822,27 @@ def fetch_required_items(wid: str, timeout: int = DEP_TIMEOUT) -> dict:
 # 下载文件
 # ===========================================================================
 def _direct_url_ok(url: str, filename: str) -> bool:
-    """中转给的 `file_url` 能不能直接当下载直链用。
+    """官方的 `file_url` 能不能直接当下载直链用。
 
-    只认「Steam CDN 上的单个 .vpk」：
+    只认「Steam CDN 上的单个 `.vpk`」：
 
     * 域名必须是 `cdn.steamusercontent.com`（`images.steamusercontent.com` 是
       封面图，合集条目经常返回那个，直接下就下成一张图了）；
-    * 文件名里不能带目录（`myl4d2addons/molotov_variants.vpk` 这种说明这个条目
-      是**多文件**的，Steam 只给了第一个文件的地址，直接下会少文件，还是交给
-      下载站打包）；
-    * 必须真的是 `.vpk`。
+    * 必须真的是 `.vpk`（`.zip` 之类的打包条目还是交给下载站）。
+
+    ★ 关于 `filename` 里带目录（`myl4d2addons/xxx.vpk`）：
+      早先这里一律拒绝，理由是「带目录说明是多文件、Steam 只给第一个」。
+      **实测这个判断是错的** —— 用本机缓存的 72 个真实工坊 ID 逐个验证：
+        · 12 个 filename 带 `myl4d2addons/` 前缀的条目，file_url 取回来
+          11 个是合法 VPK（文件头 `34 12 AA 55`），1 个是网络瞬时错误重试即可；
+        · 全部 71 个 .vpk 条目的 `Content-Length` 与 `file_size` **逐个吻合**，
+          说明 file_url 就是该条目的完整内容，不存在「只给第一个文件」。
+      所以这里不再因为带目录而拒绝，只按扩展名判断。目录前缀只是 Steam 侧
+      的上传路径残留，落盘时会被 `_safe_filename` 取 basename 掉。
     """
     url = str(url or "").strip()
-    name = str(filename or "").strip()
+    name = str(filename or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
     if not url.startswith("https://cdn.steamusercontent.com/"):
-        return False
-    if "/" in name or "\\" in name:
         return False
     return name.lower().endswith(".vpk")
 
