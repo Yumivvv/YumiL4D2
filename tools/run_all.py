@@ -87,6 +87,8 @@ DEFAULT_SUITE = [
     "round16_test",
     "round17_test",
     "lanzou_test",
+    "panfix_test",
+    "panfix2_test",
     "translate_test",
     "archive_import_test",
     "round18_test",

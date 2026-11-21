@@ -40,6 +40,21 @@ PAN_HOSTS: dict[str, tuple[str, str]] = {
     "wwi.lanzou": ("蓝奏云", "#00B8A9"),
     "lanzou": ("蓝奏云", "#00B8A9"),
     "pan.lanzou": ("蓝奏云", "#00B8A9"),
+    # 蓝奏云后来换了一批域名，跟老域名**没有共同的词根**（lanzn / lanzv / lanzm…），
+    # 所以 `pattern in host` 那种子串匹配对它们完全不生效 —— 用户报的
+    # `https://wwavf.lanzn.com/i37EB4gwigjg` 就是这种情况（提取不到）。
+    # 这里把已知的几套新域名都列上，另外靠 _LANZOU_HOST_RE 兜住「wwXXX.lanz*」
+    # 这种「子域名带随机串」的写法。
+    "lanzn.com": ("蓝奏云", "#00B8A9"),
+    "lanzn": ("蓝奏云", "#00B8A9"),
+    "lanzv.com": ("蓝奏云", "#00B8A9"),
+    "lanzm.com": ("蓝奏云", "#00B8A9"),
+    "lanzoup.com": ("蓝奏云", "#00B8A9"),
+    "lanzoui.com": ("蓝奏云", "#00B8A9"),
+    "lanzouf.com": ("蓝奏云", "#00B8A9"),
+    "lanzouw.com": ("蓝奏云", "#00B8A9"),
+    "lanzoux.com": ("蓝奏云", "#00B8A9"),
+    "lanzouy.com": ("蓝奏云", "#00B8A9"),
     "www.aliyundrive.com": ("阿里云盘", "#7B61FF"),
     "www.alipan.com": ("阿里云盘", "#7B61FF"),
     "alipan.com": ("阿里云盘", "#7B61FF"),
@@ -93,11 +108,35 @@ _CJK = re.compile(
 # B 站简介里常见的"防和谐"拆字：删除/去掉/去除 这类词
 _STOP_WORDS = re.compile(r"(删除|去掉|去除|删掉|屏蔽|防屏蔽|不要|打不开就删|中文)")
 
+# 蓝奏云的域名形状：`wwX.lanz*.<tld>` / `lanz*.<tld>`
+# 例如 wwavf.lanzn.com、wwi.lanzoup.com、pan.lanzou.com
+_LANZOU_HOST_RE = re.compile(r"(^|\.)lanz[a-z]*(\.|$)")
+
+# 整个括号块（含内容）—— 防和谐插字最常用的包装。
+# 覆盖：中文括号、英文括号、方头括号、书名号、以及「（DANKING！）」这种全角叹号结尾。
+# 注意 `[^）)]*` 不跨越另一个括号，避免把 `(a)(b)` 这种连着的吃成一大段。
+_PAREN_BLOCK = re.compile(
+    r"（[^（）]*）|\([^()]*\)|【[^【】]*】|\[[^\[\]]*\]"
+    r"|〔[^〔〕]*〕|〖[^〖〗]*〗|「[^「」]*」|『[^『』]*』"
+    r"|《[^《》]*》|〈[^〈〉]*〉"
+)
+
 
 def _clean_url(raw: str) -> str:
     """去掉 URL 中夹杂的中文和干扰文字，返回干净的 URL。"""
     s = raw
-    # 先把明显的干扰词整段删掉
+    # ✂ 先把「整段括号块」删掉（含里面的英文），再干别的。
+    #
+    # ★ 为什么必须先做这一步：作者防和谐不只插中文，还会插**纯英文**括注。
+    #   用户报的真实案例：
+    #       https://pan.b（删删删）aidu.com/s/1P9uaqDEDMoSoqH（DANKING！）W50iJHyw?pwd=62nx
+    #   旧逻辑只删中文字符（_CJK），于是 `DANKING` 这种纯 ASCII 被原样留下，
+    #   拼出的 URL 变成 .../s/1P9uaqDEDMoSoqHDANKINGW50iJHyw —— **链接是错的**，
+    #   点开必然 404，但界面上看着又像「提取成功了」，比提取不到更坑。
+    #   括号里的东西本来就不可能是路径的一部分（URL 里不会有全角括号），
+    #   所以整段丢掉是安全的。
+    s = _PAREN_BLOCK.sub("", s)
+    # 再把明显的干扰词整段删掉
     s = _STOP_WORDS.sub("", s)
     # 再逐字符过滤中文 / 全角 / 零宽
     s = _CJK.sub("", s)
@@ -117,6 +156,11 @@ def _host_label(url: str) -> tuple[str, str] | None:
     for pattern, info in PAN_HOSTS.items():
         if host == pattern or host.endswith("." + pattern) or pattern in host:
             return info
+    # 兜底：蓝奏云的域名爱换，但形状很稳定 —— `wwX.lanz*.<tld>`
+    # （wwi / wwavf / wwa / ww1… 前缀随机，lanzn / lanzou / lanzv… 主域也换）。
+    # 与其每次都等用户报「这个链接提取不到」，不如按形状认。
+    if _LANZOU_HOST_RE.search(host):
+        return PAN_HOSTS["lanzou"]
     return None
 
 
@@ -150,27 +194,66 @@ _CODE_FIND = re.compile(
 )
 
 
-def _nearest_code(text: str, url_start: int, url_end: int, spans: list[tuple[int, int]]) -> str:
-    """找文本里紧邻该链接的提取码（前后 40 字符内，且必须是最近的）。
+def _nearest_code(text: str, url_start: int, url_end: int,
+                  spans: list[tuple[int, int]]) -> str:
+    """找文本里紧邻该链接的提取码。
 
-    多个链接并存时，不能把别人的提取码算到自己头上：
-      * 落在"别的链接 URL 内部"的提取码（如 ?pwd=）直接跳过；
-      * 只接受前后 40 字符以内、且距离最近的。
+    简介里两种排版都常见，必须都认：
+
+    **① 码在同一行**（最常见的百度写法）::
+
+        https://pan.baidu.com/s/1P9uaq...?pwd=62nx 提取码: 62nx
+
+    **② 码在下一行**（夸克/蓝奏爱这么写）::
+
+        链接：https://pan.quark.cn/s/851a9b7...7089c
+        提取码：xuhr
+
+    ★ 这里改过两版，两个坑都记一下：
+      - 第一版只看「距离最近」，于是**下一行开头的码会被上一行的链接抢走**
+        （蓝奏云那行抢了上一行夸克的 `1iqM`）；
+      - 第二版限制「必须同一行」，结果**夸克这种码在下一行的又拿不到了**
+        （BV1dLyYzjEkK 那条视频就是这样）。
+      现在是：**同一行优先**；同一行找不到，才允许看**紧邻的下一行**，
+      并且中间不能夹着别的链接（否则那个码属于别人）。
     """
+    line_start = text.rfind("\n", 0, url_start) + 1
+    line_end = text.find("\n", url_end)
+    if line_end < 0:
+        line_end = len(text)
+    # 下一行范围（用于「码在下一行」那种排版）
+    next_start = line_end + 1
+    next_end = text.find("\n", next_start)
+    if next_end < 0:
+        next_end = len(text)
+
     best: tuple[int, str] | None = None
     for m in _CODE_FIND.finditer(text):
         pos = m.start()
-        if pos < url_start - 40 or pos > url_end + 40:
+        if pos < url_start - 40 or pos > url_end + 90:
             continue
-        # 这个提取码是否落在另一个 URL 里？是的话它属于那个链接
+        # 落在**别的** URL 内部的码（如别人的 ?pwd=）不属于我
         inside_other = any(
-            s <= pos < e and not (s == url_start and e == url_end) for s, e in spans
+            a <= pos < b and not (a == url_start and b == url_end)
+            for a, b in spans
         )
         if inside_other:
             continue
+
+        in_same = line_start <= pos <= line_end
+        in_next = next_start <= pos <= next_end
+        if not (in_same or in_next):
+            continue
+        # 「下一行」里的码：中间不能夹着别的链接
+        if in_next and not in_same:
+            if any(url_end < a < pos for a, _b in spans):
+                continue
+
         dist = abs(pos - url_end) if pos >= url_end else abs(url_start - pos)
-        if best is None or dist < best[0]:
-            best = (dist, m.group(1))
+        # 同一行优先：加个大权重，保证同行的码永远赢过下一行的
+        weight = dist if in_same else dist + 10000
+        if best is None or weight < best[0]:
+            best = (weight, m.group(1))
     return best[1] if best else ""
 
 
@@ -333,8 +416,19 @@ def _url_matches(text: str) -> list[tuple[str, int, int]]:
         found: list[str] = []
         for um in re.finditer(r"https?://\S+", cleaned):
             url = um.group(0).strip(".,;:!?)】]》\"'")
-            if len(url) >= 12:
-                found.append(url)
+            if len(url) < 12:
+                continue
+            # ★ 带协议头 тоже 要有分享路径：
+            #   「https://pan.baidu.com」这种只有域名的，点开是网盘首页，
+            #   不是分享 —— 同样算噪音，别列出来。
+            try:
+                _host = (urlparse(url).hostname or "").lower()
+            except ValueError:
+                _host = ""
+            _path = (urlparse(url).path or "").strip("/")
+            if _host and not _path and not urlparse(url).query:
+                continue
+            found.append(url)
 
         if not found:
             # 没有协议头：看这个 token 里是不是藏着裸网盘域名
@@ -381,6 +475,19 @@ def _bare_pan_url(cleaned: str) -> str:
         host = candidate.split("/")[0].lower()
         if not _host_label("https://" + host):
             continue          # 不是已知网盘域名
+
+        # ★ 光有域名不算链接 —— 必须有**分享路径**。
+        #   用户报的现象：简介里随口提一句「百度网盘：pan.baidu.com」
+        #   「steamcommunity.com 上有很多 MOD」也会被当成网盘链接列出来，
+        #   点开只是网盘首页，等于噪音。
+        #   真实的分享链接一定带路径，且至少有一个非空段：
+        #       pan.baidu.com/s/1AbCd      quark.cn/s/xxxx
+        #       wwavf.lanzn.com/i37EB4     afdian.com/a/xxx
+        #   所以这里要求 host 之后还有内容。
+        rest = candidate[len(host):].strip("/")
+        if not rest:
+            continue
+
         return "https://" + candidate
     return ""
 

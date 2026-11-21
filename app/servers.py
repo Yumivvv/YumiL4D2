@@ -1920,9 +1920,10 @@ class ServerManager(QObject):
         rows.append({"addr": key, "name": name[:40], "weight": 0, "panels": []})
         self._save_favorites(rows)
         self.serversChanged.emit()
-        msg = f"已收藏 {key}" + (f"（{name}）" if name else "")
-        self._set_status(msg)
-        self._toast(msg, "ok")
+        # ★ 成功后**不弹提示**：用户要求去掉「已收藏 xxx 服务器」那句。
+        #   它挂在服务器页顶部（收藏数下面），每收藏一次闪一下很吵。
+        #   卡片从「好友在玩」转成普通条目、星标消失，本身就是足够的反馈。
+        #   失败仍然要报 —— 见上面的 return，界面会显示原因。
         return {"ok": True, "addr": key, "name": name}
 
     # ------------------------------------------------------- 分享 / 剪贴板

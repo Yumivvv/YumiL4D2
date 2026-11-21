@@ -47,6 +47,7 @@ from .appearance import (
 )
 from .notifier import Notifier, play_alert, play_system_alert, set_custom_sound
 from .panlink import extract_links
+from . import panshare as PANS
 from .player import VideoPlayer
 from .downloads import DownloadManager
 from .modmanager import ModManager
@@ -2012,6 +2013,73 @@ class Core(QObject):
         #   表现就是「详情里的播放/点赞数变了，列表卡片还是旧的」。
         self._oneSig.emit(bvid)
 
+        # 顺手查一下网盘链接有没有过期（已在后台线程，不额外开线程也无妨）
+        #
+        # ★★ 这里必须先确保 rec["links"] 存在。
+        #   以前 links 只在 `_detail_payload()` 里临时算出来、塞进给界面的 dict，
+        #   **从来没写回过 rec**；而 `_check_pan_expiry(rec)` 读的是
+        #   `rec.get("links")` —— 永远是空列表，于是直接 return，
+        #   一次都没真正查过。这就是「百度网盘还是不显示过期」的根因
+        #   （第一版以为只是渲染问题，其实连查询都没发生）。
+        try:
+            if not rec.get("links"):
+                rec["links"] = extract_links(
+                    rec.get("desc") or "", fallback_label=rec.get("title") or "")
+                extra = extract_links(
+                    ((rec.get("topComment") or {}).get("text") or ""),
+                    fallback_label=rec.get("title") or "")
+                if extra:
+                    seen = {lk.get("url") for lk in rec["links"]}
+                    rec["links"] = list(rec["links"]) + [
+                        lk for lk in extra if lk.get("url") not in seen]
+            self._check_pan_expiry(rec)
+        except Exception as e:  # noqa: BLE001  过期检查失败不影响详情
+            log(f"pan expiry check crashed {bvid}: {e!r}")
+
+    def _check_pan_expiry(self, rec: dict) -> None:
+        """给 rec 里的网盘链接补上「是否过期」（在后台线程里调）。
+
+        查完把结果写回 `links[i]["expired"] / ["expireText"]`，
+        再发一次 detailReady 让界面刷新 —— 用户会看到链接旁边多出一个
+        「已过期」角标，不用逐个点开试。
+        """
+        links = rec.get("links") or []
+        if not links:
+            return
+        urls = [str(lk.get("url") or "") for lk in links]
+        if not any("baidu.com" in u or "quark.cn" in u for u in urls):
+            return          # 只有这两家支持过期查询
+        try:
+            # ★ 把提取码一起传下去：夸克那边带上更接近真实访客的请求
+            #   （用户报的那条 `f333944cc3c6` 码是 `1iqM`，正是从详情里提取到的）。
+            codes = {str(lk.get("url") or ""): str(lk.get("code") or "")
+                     for lk in links}
+            results = PANS.check_many(urls, codes=codes)
+        except Exception as e:  # noqa: BLE001
+            log(f"check_many failed: {e!r}")
+            return
+        changed = False
+        for lk in links:
+            u = str(lk.get("url") or "")
+            res = results.get(u) or {}
+            if not res or res.get("state") == "unknown":
+                continue
+            state = res.get("state") or "ok"
+            expired = state in ("expired", "gone")
+            text = str(res.get("text") or "")
+            days = int(res.get("expireDays") or 0)
+            if (bool(lk.get("expired")) != expired
+                    or lk.get("expireText") != text
+                    or int(lk.get("expireDays") or 0) != days):
+                lk["expired"] = expired
+                lk["expireText"] = text
+                # 还剩几天 —— 界面用它在「快到期」时提醒（≤30 天）
+                lk["expireDays"] = days
+                changed = True
+        if changed and not self._closing:
+            # 已经算好新数据了，直接推给界面（和详情加载走同一条信号）
+            self.detailReady.emit(self._detail_payload(rec))
+
     def _refresh_one(self, bvid: str) -> None:
         """只刷新列表里的一条（原位 dataChanged，不动滚动位置）。"""
         if self._closing:
@@ -2055,6 +2123,27 @@ class Core(QObject):
                 d["commentLinks"] = []
         else:
             d["commentLinks"] = []
+        # ★ 网盘链接的「过期状态」不在主线程查 —— 那是网络请求，会把打开详情
+        #   卡住好几秒。这里只留一个空字段，交给 _check_pan_expiry 补。
+        #
+        # ★★ 但有个坑必须处理：上面 `extract_links(desc)` 是**每次重新提取**的，
+        #   它返回的是全新 dict，而 `_check_pan_expiry` 是把结果写进
+        #   `rec["links"]` 里的那些 dict 上的。于是「查到了过期信息 → 推送界面」
+        #   时，_detail_payload 又重算一遍 links，**把查好的 expired/expireDays
+        #   全冲掉了** —— 用户看到的就是「百度网盘还是不显示过期」。
+        #   现在按 url 把 rec 里已经查到的状态回填过来。
+        known = {str(x.get("url") or ""): x for x in (rec.get("links") or [])}
+        for lk in d["links"]:
+            u = str(lk.get("url") or "")
+            src = known.get(u)
+            if src:
+                lk["expired"] = bool(src.get("expired"))
+                lk["expireText"] = str(src.get("expireText") or "")
+                lk["expireDays"] = int(src.get("expireDays") or 0)
+            else:
+                lk.setdefault("expired", False)
+                lk.setdefault("expireText", "")
+                lk.setdefault("expireDays", 0)
         return d
 
     # ================================================================= 封面

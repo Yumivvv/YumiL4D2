@@ -74,6 +74,21 @@ def main() -> int:
             if items:
                 bvid = items[0]["bvid"]
                 win.openDetail(bvid)
+                # EXTRA == "expired"：把第一条链接标成「已过期」再拍，
+                # 用来验收那个角标长什么样（真实过期状态要联网查，
+                # 截图不能依赖网络）
+                if EXTRA == "expired":
+                    wait_ms(1200)
+                    dv = win.property("detailVideo") or {}
+                    links = list(dv.get("links") or [])
+                    if links:
+                        links[0] = dict(links[0])
+                        links[0]["expired"] = True
+                        links[0]["expireText"] = "已过期（2026-08-01）"
+                        dv = dict(dv)
+                        dv["links"] = links
+                        win.setProperty("detailVideo", dv)
+                        log("  已把第 1 条链接标成过期")
         elif MODE == "player":
             items = core.library.all_items()
             if items:

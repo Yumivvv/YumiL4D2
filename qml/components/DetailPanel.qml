@@ -47,9 +47,17 @@ Item {
     property var pendingLink: ({})
 
     // 只对蓝奏云弹选择：其它网盘没有稳定直链，硬解析只会失败
+    //
+    // ★ 不能只认 `lanzou` 子串：蓝奏云换过好几批域名，新的
+    //   `wwavf.lanzn.com` 里压根没有 `lanzou` 这个词根。
+    //   以前这里返回 false，于是「本地下载（解析直链）」那个菜单
+    //   整个不出现 —— 用户报的「蓝奏云没有本地解析下载」就是它。
+    //   现在按形状认：host 里有一段以 lanz 开头即可（和 lanzou.py 一致）。
     function isLanzou(url) {
         var u = (url || "").toLowerCase();
-        return u.indexOf("lanzou") >= 0;
+        var m = u.match(/^https?:\/\/([^\/?#]+)/);
+        var host = m ? m[1] : u;
+        return /(^|\.)lanz[a-z]*(\.|$)/.test(host);
     }
 
     width: 480
@@ -66,7 +74,11 @@ Item {
     // 现在先给简介留够 descMin，剩下的空间再按 55% / 45% 分给前两块 ——
     // 两块加起来也只吃「余量」那点，不会动到简介的那一份。
     readonly property real belowStats: Math.max(0, actionsRow.y - (statsBox.y + statsBox.height) - 20)
-    readonly property real descMin: 132
+    // ★ 简介保底从 132 降到 116：用户反馈「网盘和置顶评论太小、滚动条不好拖」。
+    //   简介本来就有自己的 Flickable，少给十几像素影响不大；
+    //   而网盘/评论这两块每块都可能有好几条，空间一挤滚动条就只剩几个像素，
+    //   鼠标根本抓不住。腾出来的这点全给它们。
+    readonly property real descMin: 116
     // 简介标题那行 + 上下边距的固定开销（量出来约 46~54px，留 56 稳一点）
     readonly property real descChrome: 56
     readonly property real shareRoom: Math.max(0, belowStats - descChrome - descMin)
@@ -96,15 +108,17 @@ Item {
         if (everythingFits) return linkNeed;
         // 只有网盘没有评论 → 独吞
         if (!hasComment) return shareRoom;
-        return Math.max(0, shareRoom * 0.55);
+        // ★ 网盘 60%（原 55%）：链接一行就是 30~46px，多一条就要滚动，
+        //   空间太小时滚动条只有几个像素高，鼠标抓不住。
+        return Math.max(0, shareRoom * 0.60);
     }
     readonly property real commentBudget: {
         if (!hasComment) return 0;
         if (everythingFits) return commentNeed;
         // 只有评论没有网盘 → 独吞（这正是用户报的那个场景）
         if (!hasLinks) return Math.max(commentFloor, shareRoom);
-        // 两样都有：按 45% 分，但**不低于保底**
-        return Math.max(Math.min(commentFloor, commentNeed), shareRoom * 0.45);
+        // 两样都有：评论拿剩下那 40%，但**不低于保底**
+        return Math.max(Math.min(commentFloor, commentNeed), shareRoom * 0.40);
     }
 
     // ---------------- 滚轮防穿透 ----------------
@@ -455,10 +469,10 @@ Item {
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
-                width: 10
-                padding: 2
+                width: 14
+                padding: 0
                 contentItem: Rectangle {
-                    implicitWidth: 6
+                    implicitWidth: 10
                     radius: 3
                     color: parent.pressed ? Theme.scrim(0.42)
                                          : (parent.hovered ? Theme.scrim(0.32)
@@ -565,6 +579,66 @@ Item {
                                         color: Theme.warn
                                         font.family: Theme.monoFont
                                         font.pixelSize: 9
+                                    }
+                                }
+
+                                // ---- 已过期 / 已失效角标 ----
+                                // 后端查百度 shorturlinfo 拿到的结论（见 app/panshare.py）。
+                                // 过期了就直接写在链接旁边，用户不用点开才发现「分享已过期」。
+                                Rectangle {
+                                    objectName: "linkExpiredTag"
+                                    visible: modelData.expired === true
+                                    height: 16
+                                    width: expTxt.implicitWidth + 10
+                                    radius: 3
+                                    color: Qt.rgba(Theme.error.r, Theme.error.g,
+                                                   Theme.error.b, 0.18)
+                                    border.width: 1
+                                    border.color: Qt.rgba(Theme.error.r, Theme.error.g,
+                                                          Theme.error.b, 0.42)
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    Text {
+                                        id: expTxt
+                                        anchors.centerIn: parent
+                                        text: (modelData.expireText || "").indexOf("不存在") >= 0
+                                              ? "已失效" : "已过期"
+                                        color: Theme.error
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: 9
+                                        font.weight: Font.DemiBold
+                                    }
+                                }
+
+                                // ---- 「N 天后到期」提醒 ----
+                                // ★ 用户报的：「7 天后过期的链接没有提示」。
+                                //   以前 expireText 只在**已过期**那个红角标里用，
+                                //   没过期的链接虽然查到了到期日，却一个字都不显示 ——
+                                //   等于白查。现在快到期（≤30 天）就用橙色角标提醒，
+                                //   让人趁早存一份，而不是等到点开才发现失效。
+                                Rectangle {
+                                    objectName: "linkExpiringTag"
+                                    visible: !(modelData.expired === true)
+                                             && (modelData.expireDays || 0) > 0
+                                             && (modelData.expireDays || 0) <= 30
+                                    height: 16
+                                    width: soonTxt.implicitWidth + 10
+                                    radius: 3
+                                    color: Qt.rgba(Theme.warn.r, Theme.warn.g,
+                                                   Theme.warn.b, 0.16)
+                                    border.width: 1
+                                    border.color: Qt.rgba(Theme.warn.r, Theme.warn.g,
+                                                          Theme.warn.b, 0.42)
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    Text {
+                                        id: soonTxt
+                                        anchors.centerIn: parent
+                                        text: (modelData.expireDays || 0) <= 1
+                                              ? "今天到期"
+                                              : ((modelData.expireDays || 0) + " 天后到期")
+                                        color: Theme.warn
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: 9
+                                        font.weight: Font.DemiBold
                                     }
                                 }
                             }
@@ -704,10 +778,10 @@ Item {
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
-                width: 10
-                padding: 2
+                width: 14
+                padding: 0
                 contentItem: Rectangle {
-                    implicitWidth: 6
+                    implicitWidth: 10
                     radius: 3
                     color: parent.pressed ? Theme.scrim(0.42)
                                          : (parent.hovered ? Theme.scrim(0.32)
@@ -975,8 +1049,8 @@ Item {
         flickableDirection: Flickable.VerticalFlick
         ScrollBar.vertical: ScrollBar {
             policy: ScrollBar.AsNeeded
-            width: 12
-            padding: 2
+            width: 14
+            padding: 0
             contentItem: Rectangle {
                 implicitWidth: 8
                 radius: 4

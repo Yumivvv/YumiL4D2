@@ -262,12 +262,16 @@ Item {
             return
         var res = page.mgr.saveFriendServer(row.addr)
         if (res && res.ok) {
-            page.hintText = "已收藏 " + (res.name || row.addr)
-            page.hintAt = Date.now()
-            // 收藏后它就是普通条目了，重选一下让右侧面板刷新
+            // ★ 成功后**不弹任何提示**。
+            //   用户明确要求去掉「已收藏 xxx」这行 —— 它就挂在
+            //   「服务器收藏数」下面那条 hint，每收藏一次闪一下，
+            //   很吵。收藏本身是图标状态的变化（星标变实心 / 卡片从
+            //   「好友在玩」转到普通条目），已经够让人确认了。
+            //   收藏后重选一下让右侧面板刷新。
             if (page.selected && page.selected.addr === row.addr)
                 page.selected = null
         } else {
+            // 失败要说 —— 否则用户不知道为什么点了没反应
             page.hintText = (res && res.error) || "收藏失败"
             page.hintAt = Date.now()
         }
@@ -4088,8 +4092,12 @@ Item {
                             id: saveFriendTxt
                             objectName: "saveFriendBtn"
                             anchors.verticalCenter: parent.verticalCenter
-                            text: saveFriendMa.containsMouse ? "收藏（点这里保留）" : "收藏"
-                            color: Theme.accent
+                            // 文案固定「收藏」：以前 hover 时会变成
+                            // 「收藏（点这里保留）」，文字一长整条提示条跟着抖，
+                            // 看着很毛躁。悬停只换颜色（见下面 color 绑定）就够。
+                            text: "收藏"
+                            color: saveFriendMa.containsMouse
+                                   ? Qt.lighter(Theme.accent, 1.25) : Theme.accent
                             font.family: Theme.uiFont
                             font.pixelSize: 10
                             font.weight: Font.DemiBold

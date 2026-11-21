@@ -73,6 +73,9 @@ QtObject {
     readonly property color cyan: dark ? "#4DD0E1" : "#0E9CB3"
     readonly property color ok: dark ? "#3ED598" : "#1FA97A"
     readonly property color warn: dark ? "#F5B33C" : "#C4860F"
+    // 失败/危险态（网盘链接已过期、已失效这类）。比 warn 更红一档，
+    // 让人一眼区分「注意一下」和「这东西不能用了」。
+    readonly property color error: dark ? "#FF5C5C" : "#D93636"
 
     readonly property color text: dark ? "#EDF0F7" : "#141A26"
     readonly property color textDim: dark ? "#A6AEC2" : "#47516A"

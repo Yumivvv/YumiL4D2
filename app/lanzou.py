@@ -78,6 +78,9 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 # 域名换过十几茬，用「含 lanzou」判断
 LANZOU_HINT = "lanzou"
+# 蓝奏云域名的形状：`lanzou*` / `lanzn` / `lanzv` / `lanzm`…
+# （子域名还带随机串：wwi / wwavf / wwx / ww1…，所以只看 host 里有没有 lanz 段）
+LANZOU_HOST_RE = re.compile(r"(^|\.)lanz[a-z]*(\.|$)")
 
 # 取直链的表单地址（不在分享页域名下）
 AJAX_HOST = "https://apifile.woozooo.com/"
@@ -329,11 +332,20 @@ def clean_lanzou_url(url: str) -> str:
 
 
 def is_lanzou(url: str) -> bool:
+    """这个链接是不是蓝奏云。
+
+    ★ 不能只认 `lanzou` 这个子串：蓝奏云换过好几批域名，
+      老的是 `lanzou*`，新的有 `lanzn.com` / `lanzv.com` 这些
+      **不含 `lanzou` 词根**的写法。用户报的
+      `https://wwavf.lanzn.com/i37EB4gwigjg` 就因为这条判断失败，
+      整个「本地解析下载」入口都不出现。
+      现在按形状认：host 里有一段以 `lanz` 开头就算。
+    """
     try:
         host = (urllib.parse.urlparse(clean_lanzou_url(url)).hostname or "").lower()
     except ValueError:
         return False
-    return LANZOU_HINT in host
+    return bool(LANZOU_HOST_RE.search(host))
 
 
 def _js_var(page: str, name: str) -> str:
