@@ -245,6 +245,10 @@ Item {
             page.hintAt = Date.now()
             return
         }
+        // ★ 一定要清掉上次多选留下的选择。
+        //   否则「先多选导出 → 取消 → 再普通导出」会把上次勾中的那几台
+        //   当成这次的导出范围，用户看到的又是「不全」或「莫名少了几台」。
+        page.exportAddrs = []
         page.requestExport()
     }
 

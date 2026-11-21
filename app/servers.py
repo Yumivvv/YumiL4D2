@@ -2456,7 +2456,12 @@ class ServerManager(QObject):
     # ★ **密码绝不导出**。面板密码是用本机 Windows 账户密钥（DPAPI）加密的，
     #   换台电脑根本解不开，导出密文只会让对方拿到一串废数据，还多一层误会。
     #   所以导出的 `pw` 一律清空，导入时也不碰对方本机已有的密码。
-    @Slot(str, result="QVariantMap")
+    #
+    # ★ 槽签名必须把 addrs 也声明出来：以前只写了 `@Slot(str, ...)`，
+    #   而方法实际有两个参数 —— QML 调 `exportConfig(s, picked)` 时，
+    #   第二个参数会被 PySide6 **直接丢掉**，addrs 永远是默认的 None，
+    #   于是「多选导出」每次都变成全量导出（用户报的那个 bug）。
+    @Slot(str, "QVariantList", result="QVariantMap")
     def exportConfig(self, path: str, addrs: list | None = None) -> dict:
         """把收藏的服务器写成 JSON（**不含密码**）。``path`` 为空就报错。
 

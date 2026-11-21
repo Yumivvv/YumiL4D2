@@ -566,7 +566,7 @@ Window {
                     Item { width: 1; height: 14 }
 
                     Text {
-                        text: "MOD"
+                        text: "工具"
                         color: Theme.textMute
                         font.family: Theme.uiFont
                         font.pixelSize: 10
