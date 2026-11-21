@@ -256,6 +256,23 @@ Item {
         page.requestImport()
     }
 
+    // 把「好友在玩」里那台临时服务器存成收藏（存了就常驻，不再随好友退出消失）
+    function saveFriend(row) {
+        if (!page.mgr || !row || !(row.addr || "").length)
+            return
+        var res = page.mgr.saveFriendServer(row.addr)
+        if (res && res.ok) {
+            page.hintText = "已收藏 " + (res.name || row.addr)
+            page.hintAt = Date.now()
+            // 收藏后它就是普通条目了，重选一下让右侧面板刷新
+            if (page.selected && page.selected.addr === row.addr)
+                page.selected = null
+        } else {
+            page.hintText = (res && res.error) || "收藏失败"
+            page.hintAt = Date.now()
+        }
+    }
+
     // 多选状态下导出：只导出勾中的那些（后端 exportConfig 支持 addrs 参数）
     function askExportChecked() {
         if (!page.mgr)
@@ -3426,12 +3443,19 @@ Item {
                         Row {
                             width: parent.width
                             height: 14
-                            spacing: 6
+                            spacing: 8
 
                             Text {
-                                // 有好友时让出一点宽度给右边的好友标签
-                                width: parent.width - (friendTag.visible
-                                                       ? friendTag.width + 6 : 0)
+                                id: addrTxt
+                                // ★ 地址按**内容宽度**排，不要撑满一行。
+                                //   以前这里写的是 parent.width - 标签宽，
+                                //   地址本身只有 15 个字符、后面留一大片空白，
+                                //   好友标签就被推到了卡片**中间**，
+                                //   看起来压住了右边的内容、很不协调。
+                                //   现在让两者紧挨着排在左边。
+                                width: Math.min(implicitWidth, parent.width
+                                                - (friendTag.visible
+                                                   ? friendTag.width + 8 : 0))
                                 height: 14
                                 verticalAlignment: Text.AlignVCenter
                                 text: modelData.addr
@@ -3555,6 +3579,17 @@ Item {
                             tip: "分享给好友（复制地址文本）"
                             boxSize: 22
                             onClicked: page.askShare(srvCard.modelData)
+                        }
+                        // 「收藏这台」：只对**好友在玩、还没收藏**的那种出现。
+                        // 好友服务器默认是临时的（好友一退就消失），
+                        // 想留住就点这颗星。已收藏的不会显示（没什么可存的）。
+                        IconButton {
+                            objectName: "srvCardSaveFriend"
+                            glyph: "\uE734"      // Star（空心）
+                            tip: "收藏这台服务器（现在只是临时显示）"
+                            boxSize: 22
+                            visible: srvCard.modelData.fromFriend
+                            onClicked: page.saveFriend(srvCard.modelData)
                         }
                         IconButton {
                             objectName: "srvCardEdit"
@@ -4007,6 +4042,65 @@ Item {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: if (page.mgr && page.selected) page.mgr.copyAddress(page.selected.addr)
+                        }
+                    }
+                }
+
+                // ---- 「好友在玩」的临时提示条 ----
+                // 这台只是因为好友正在玩才出现的，不进配置：好友一退/换服它就消失。
+                // 想留住就点右边这颗「收藏」。
+                Rectangle {
+                    objectName: "friendTempBar"
+                    width: parent.width
+                    height: visible ? 34 : 0
+                    visible: page.selected && page.selected.fromFriend
+                    radius: Theme.radiusXS
+                    color: Qt.rgba(page.accent.r, page.accent.g, page.accent.b, 0.12)
+                    border.width: 1
+                    border.color: Qt.rgba(page.accent.r, page.accent.g,
+                                          page.accent.b, 0.34)
+
+                    Row {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 6
+
+                        Text {
+                            text: "\uE748"      // 人形
+                            color: page.accent
+                            font.family: Theme.iconFont
+                            font.pixelSize: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Text {
+                            width: parent.width - saveFriendTxt.width - 40
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "好友正在玩，好友退出后这台会消失"
+                            color: Theme.accent
+                            font.family: Theme.uiFont
+                            font.pixelSize: 10
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            id: saveFriendTxt
+                            objectName: "saveFriendBtn"
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: saveFriendMa.containsMouse ? "收藏（点这里保留）" : "收藏"
+                            color: Theme.accent
+                            font.family: Theme.uiFont
+                            font.pixelSize: 10
+                            font.weight: Font.DemiBold
+                            MouseArea {
+                                id: saveFriendMa
+                                anchors.fill: parent
+                                anchors.margins: -6
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: page.saveFriend(page.selected)
+                            }
                         }
                     }
                 }

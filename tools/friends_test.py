@@ -140,8 +140,82 @@ def main():
     keys2 = [g["key"] for g in gs2]
     check("没有好友时不出「好友在玩」", S.FRIEND_GROUP_KEY not in keys2, str(keys2))
 
-    # ---------------------------------------------------------- 5. QML
-    print("=== 5. QML 界面 ===")
+    # ---------------------------------------------------------- 5. 刷新覆盖
+    print("=== 5. 刷新时好友服务器也要被查 ===")
+    # 这是这次修的问题：refreshAll 以前只查 _favorites()，
+    # 「好友在玩但没收藏」的那种卡片永远停在「未查询」，地图/人数全空。
+    m3 = make_mgr()
+    fav_addr = "1.2.3.4:27015"            # make_mgr 里已收藏
+    new_addr = "203.0.113.77:27015"        # 好友在玩、没收藏
+    m3._friends_map = {fav_addr: [{"name": "甲"}],
+                       new_addr: [{"name": "乙"}]}
+    lst = m3._friends_addr_list()
+    check("_friends_addr_list 有这个方法", hasattr(m3, "_friends_addr_list"))
+    check("列进未收藏的那台", new_addr in lst, str(lst))
+    check("已收藏的不重复列", fav_addr not in lst, str(lst))
+    check("只列 1 台", len(lst) == 1, str(lst))
+
+    # 源码里 refreshAll 确实把好友地址并进查询清单
+    src = open(os.path.join(ROOT, "app", "servers.py"), encoding="utf-8").read()
+    i = src.find("def refreshAll(")
+    body_r = src[i:i + 900] if i > 0 else ""
+    check("refreshAll 里并入了好友地址", "_friends_addr_list()" in body_r)
+    # 读完好友后要主动查那些新地址
+    j = src.find("def refreshFriends(")
+    body_f = src[j:j + 2200] if j > 0 else ""
+    check("refreshFriends 会主动查新地址",
+          "_query_friends_addrs" in body_f, "")
+    check("有 _query_friends_addrs 实现", "def _query_friends_addrs(" in src)
+
+    # ---------------------------------------------------------- 6. 可收藏
+    print("=== 6. 好友在玩默认临时、可手动收藏 ===")
+    # 用真 Core 更贴近实际（saveFriendServer 要写配置）
+    from PySide6.QtWidgets import QApplication as _QA
+    _app = _QA.instance() or _QA(sys.argv[:1])
+    from app.core import Core as _Core
+    core = _Core(_app)
+    mgr = core.servers
+
+    tmp_addr = "203.0.113.99:27015"        # TEST-NET-3，绝不会是真实服务器
+    check("测试地址不在收藏里",
+          tmp_addr not in {r["addr"] for r in mgr._favorites()})
+
+    mgr._friends_map = {tmp_addr: [{"name": "测试好友"}]}
+    mgr._friends_l4d2 = [{"name": "测试好友"}]
+
+    row = next((r for r in mgr.servers if r["addr"] == tmp_addr), None)
+    check("默认就出现在列表里", row is not None)
+    if row:
+        check("标 fromFriend", row["fromFriend"] is True)
+    check("默认**不**写进配置",
+          tmp_addr not in {r["addr"] for r in mgr._favorites()})
+
+    res = mgr.saveFriendServer(tmp_addr)
+    check("收藏成功", res.get("ok") is True, str(res))
+    check("收藏后进配置",
+          tmp_addr in {r["addr"] for r in mgr._favorites()})
+    row2 = next((r for r in mgr.servers if r["addr"] == tmp_addr), None)
+    if row2:
+        check("收藏后不再是 fromFriend", row2["fromFriend"] is False)
+
+    res2 = mgr.saveFriendServer(tmp_addr)
+    check("重复收藏被拒", res2.get("ok") is False, str(res2))
+
+    # 好友退出：收藏的留着，没收藏的消失
+    mgr._friends_map = {}
+    mgr._friends_l4d2 = []
+    check("好友退出后收藏的那台还在",
+          any(r["addr"] == tmp_addr for r in mgr.servers))
+
+    tmp2 = "203.0.113.100:27015"
+    mgr._friends_map = {tmp2: [{"name": "另一个"}]}
+    check("另一台临时服出现了", any(r["addr"] == tmp2 for r in mgr.servers))
+    mgr._friends_map = {}
+    check("没收藏的临时服随好友消失",
+          not any(r["addr"] == tmp2 for r in mgr.servers))
+
+    # ---------------------------------------------------------- 7. QML
+    print("=== 7. QML 界面 ===")
     qml = open(os.path.join(ROOT, "qml", "components", "ServersPage.qml"),
                encoding="utf-8").read()
     for s, label in (
@@ -160,6 +234,21 @@ def main():
     body = qml[idx:idx + 700] if idx >= 0 else ""
     check("titleOf 对好友独有服给友好标题", "fromFriend" in body)
     check("titleOf 仍然优先用用户起的名字", 'row.name || ""' in body)
+
+    # 好友标签要**紧跟地址**，不能因为地址撑满一行被推到卡片中间
+    k = qml.find('objectName: "friendTag"')
+    seg = qml[max(0, k - 1400):k] if k > 0 else ""
+    check("地址按内容宽度排（不再撑满一行）", "implicitWidth" in seg, "")
+    check("地址不再写 parent.width - 标签宽", "width: parent.width - (friendTag.visible"
+          not in seg, "仍是旧写法" if "width: parent.width - (friendTag.visible" in seg else "")
+
+    # 收藏入口：卡片星标 + 详情面板提示条
+    check("卡片有「收藏」按钮", 'objectName: "srvCardSaveFriend"' in qml)
+    check("收藏按钮只对 fromFriend 显示",
+          "visible: srvCard.modelData.fromFriend" in qml)
+    check("有 saveFriend 函数", "function saveFriend(" in qml)
+    check("详情面板有临时提示条", 'objectName: "friendTempBar"' in qml)
+    check("提示条说明会消失", "好友退出后这台会消失" in qml)
 
     print()
     if FAILS:

@@ -1673,6 +1673,16 @@ class ServerManager(QObject):
         """
         return dict(getattr(self, "_friends_map", {}) or {})
 
+    def _friends_addr_list(self) -> list[str]:
+        """好友在玩、但还没收藏的服务器地址（刷新时要一起查）。"""
+        known = {str(r.get("addr") or "").lower() for r in self._favorites()}
+        out: list[str] = []
+        for addr in self._friends_by_addr():
+            a = str(addr or "").strip().lower()
+            if a and a not in known:
+                out.append(a)
+        return out
+
     def refreshFriends(self) -> dict:
         """后台刷新好友状态（在 worker 线程里调）。
 
@@ -1698,8 +1708,50 @@ class ServerManager(QObject):
             self._friends_at = time.time()
 
         self.serversChanged.emit()
+
+        # ★ 新出现的好友服务器要**主动查一次**，否则那些卡片会一直是
+        #   「未查询」：地图/人数/延迟全空。用户看到的就是「好友在玩，
+        #   但什么信息都没有」——这次报的问题就是它。
+        #   只查「还没有有效数据」的那些，避免每 90 秒把已知的重复查一遍。
+        need = []
+        for addr in fmap:
+            a = str(addr or "").strip().lower()
+            if not a:
+                continue
+            live = self._live.get(a) or {}
+            if live.get("state") not in ("online", "off"):
+                need.append(a)
+        if need:
+            threading.Thread(target=self._query_friends_addrs,
+                             args=(need,), daemon=True).start()
+
         return {"ok": True, "error": "", "count": len(all_l4d2),
                 "servers": len(fmap)}
+
+    def _query_friends_addrs(self, addrs: list[str]) -> None:
+        """后台把一批「好友在玩」的地址查一遍（不碰收藏，只填 _live）。"""
+        try:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                for addr, live in zip(addrs, pool.map(query_info, addrs)):
+                    if self._closed:
+                        return
+                    if live.get("ok"):
+                        label = map_label(live.get("map") or "")
+                        title, chapter = split_map(label)
+                        live["mapName"] = label
+                        live["mapTitle"] = title
+                        live["chapter"] = chapter
+                        live["state"] = "online"
+                    else:
+                        live["state"] = "off"
+                    live["checkedText"] = time.strftime(
+                        "%H:%M:%S", time.localtime())
+                    with self._lock:
+                        self._live[addr] = live
+                    self._emit(self.serverUpdated, dict(live))
+            self._emit(self.serversChanged)
+        except Exception as e:  # noqa: BLE001
+            log(f"query friends addrs failed: {e!r}")
 
     @Slot(result="QVariantMap")
     def refreshFriendsNow(self) -> dict:
@@ -1828,6 +1880,50 @@ class ServerManager(QObject):
         self._set_status(f"已添加 {addr}"
                          + (f"（{default_name}）" if default_name else ""))
         return {"ok": True, "addr": addr, "name": default_name}
+
+    @Slot(str, result="QVariantMap")
+    def saveFriendServer(self, addr: str) -> dict:
+        """把「好友在玩」里那台**临时**服务器存成收藏。
+
+        好友在玩的服务器默认只是**借用 Steam 的实时状态显示**，不进配置：
+        好友一退、或换服，它就从列表里消失。这是刻意的 ——
+        否则你列表里会慢慢堆满一堆「当初谁在玩来着」的死服。
+
+        但有时候确实想留住（比如觉得这服不错），所以给一个显式动作。
+        存的时候用**服务器自报的名字**当备注（查不到才退回地址），
+        和「只填 IP 添加」保持一致的体验。
+        """
+        raw = str(addr or "").strip()
+        if not raw:
+            return {"ok": False, "error": "没有地址", "addr": ""}
+        try:
+            key = normalize_address(raw).lower()
+        except ServerError as exc:
+            return {"ok": False, "error": str(exc), "addr": raw}
+
+        rows = self._favorites()
+        if self._find(rows, key):
+            return {"ok": False, "error": "这台已经在收藏里了", "addr": key}
+
+        # 名字优先用**已经查到的**（列表里那张卡就在 _live 里），
+        # 没有才临时问一次。这样点「收藏」几乎瞬间完成，不用等网络。
+        live = self._live.get(key) or {}
+        name = str(live.get("name") or "").strip()
+        if not name:
+            try:
+                obs = self._query_one_sync(key)
+                if isinstance(obs, dict) and obs.get("ok"):
+                    name = str(obs.get("name") or "").strip()
+            except Exception as e:  # noqa: BLE001
+                log(f"saveFriendServer name lookup failed {key}: {e!r}")
+
+        rows.append({"addr": key, "name": name[:40], "weight": 0, "panels": []})
+        self._save_favorites(rows)
+        self.serversChanged.emit()
+        msg = f"已收藏 {key}" + (f"（{name}）" if name else "")
+        self._set_status(msg)
+        self._toast(msg, "ok")
+        return {"ok": True, "addr": key, "name": name}
 
     # ------------------------------------------------------- 分享 / 剪贴板
     #
@@ -2958,12 +3054,19 @@ class ServerManager(QObject):
     @Slot()
     def refreshAll(self) -> None:
         rows = self._favorites()
-        if not rows:
+        # ★ 好友在玩、但**还没收藏**的服务器也要一起查，否则那些卡片
+        #   永远停在「未查询」：地图、人数、延迟全是空的 —— 而它们恰恰是
+        #   用户最想知道「现在几人在玩、什么图」的那几条。
+        #   （以前只查 _favorites()，好友条目根本不在查询范围内。）
+        addrs = [r["addr"] for r in rows]
+        for addr in self._friends_addr_list():
+            if addr not in addrs:
+                addrs.append(addr)
+        if not addrs:
             self._set_status("先加一个服务器地址吧")
             return
         if self._busy:
             return
-        addrs = [r["addr"] for r in rows]
         for addr in addrs:
             with self._lock:
                 self._live[addr] = {"state": "querying"}
