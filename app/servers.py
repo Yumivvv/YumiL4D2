@@ -56,7 +56,11 @@ from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 
 from . import util
+from . import steamfriends as SF
 from . import workshop_dns as WDNS
+from .util import Log
+
+log = Log("servers.log")
 
 DEFAULT_PORT = 27015
 QUERY_TIMEOUT = 2.2
@@ -73,6 +77,14 @@ MAP_TTL = 7 * 24 * 3600.0
 #   表覆盖 L4D2 官方 13 个战役（c1~c13）的全部章节 + 常见社区图。
 #   查不到的图就显示地图代码本身，不影响使用。
 MAP_CACHE_PATH = os.path.join(util.CACHE_DIR, "maps.json")
+
+# ---- 好友在玩的服务器 ----
+# 「好友服务器」在合集选择器里单独占一项，和「全部 / 未分类 / 自动合集」并列。
+# 用 __friends__ 这种带下划线的前缀，避免和真实服名撞车。
+FRIEND_GROUP_KEY = "__friends__"
+FRIEND_GROUP_LABEL = "好友在玩"
+# 好友状态多久刷新一次（秒）。太频繁没必要，Steam 那边状态也变得不快。
+FRIEND_REFRESH_SEC = 90
 
 _INFO_REQ = b"\xff\xff\xff\xff\x54Source Engine Query\x00"
 _PLAYERS_REQ = b"\xff\xff\xff\xff\x55\xff\xff\xff\xff"
@@ -569,8 +581,18 @@ def resolve_host(host: str, timeout: float = 3.0) -> str:
 # 名字 / 模式 / 地图
 # ---------------------------------------------------------------------------
 def clean_name(raw: str) -> str:
-    """去掉 Valve 彩色名字里的控制字符，压掉多余空格。"""
+    """去掉 Valve 彩色名字里的控制字符，压掉多余空格。
+
+    ★ 顺带去掉 BOM（``\\ufeff``）和各种零宽字符：不少国内服的服务器名
+      开头带一个 UTF-8 BOM（``〖黑喵0〗多人多特`` 前面就有），
+      它不可见但会占一个字符宽度，导致：
+        · 名字排序错位（带 BOM 的永远排最前）；
+        · 卡片标题开头像多了一个空格；
+        · 导出/分享出去的文本里带着看不见的脏字符。
+    """
     text = _CTRL_RE.sub("", raw or "").replace("\ufffd", "")
+    # BOM + 零宽空格/连接符/方向标记
+    text = re.sub("[\ufeff\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", text)
     return _SPACE_RE.sub(" ", text).strip()
 
 
@@ -1302,6 +1324,16 @@ class ServerManager(QObject):
         self.core = core
         self.config = core.config
         self._live: dict[str, dict] = {}
+        # ---- 好友在玩 ----
+        # _friends_map  {addr: [好友...]}        —— 有服务器地址的
+        # _friends_l4d2 全部在玩 L4D2 的好友       —— 含没共享地址的
+        # 这几项只由 refreshFriends() 在后台线程里写，读接口只读内存。
+        self._friends_map: dict[str, list[dict]] = {}
+        self._friends_l4d2: list[dict] = []
+        self._friends_ok = False
+        self._friends_err = ""
+        self._friends_me = ""
+        self._friends_at = 0.0
         self._busy = False
         self._status = ""
         self._lock = threading.Lock()
@@ -1377,9 +1409,12 @@ class ServerManager(QObject):
 
     def _merged(self) -> list[dict]:
         rows: list[dict] = []
+        # 好友在玩的服务器：{addr: [好友...]}。取不到就是空 dict，不影响列表。
+        fmap = self._friends_by_addr()
         for fav in self._favorites():
             live = self._live.get(fav["addr"]) or {}
             panels = fav.get("panels") or []
+            pals = fmap.get(fav["addr"]) or []
             rows.append({
                 "addr": fav["addr"],
                 "name": fav["name"],
@@ -1398,6 +1433,12 @@ class ServerManager(QObject):
                 "mode": live.get("mode", ""),
                 "modeLabel": live.get("modeLabel", "未知"),
                 "modeSource": live.get("modeSource", ""),
+                # ---- 好友信息 ----
+                # friends: 正在这台服务器上玩的好友昵称列表
+                # fromFriend: 这条是不是「因为好友在玩才加进来的」（非收藏）
+                "friends": [p["name"] for p in pals],
+                "friendCount": len(pals),
+                "fromFriend": False,
                 # 自动分类：先按「名字里的提示词」归类，猜不出再借 mode 的结论。
                 # ★ 这两套词表本来是分开的（`SERVER_CATEGORIES` vs `NAME_MODES`），
                 #   于是会出现「卡片上写着战役、分类条里却是其他」的自相矛盾
@@ -1409,6 +1450,49 @@ class ServerManager(QObject):
                 # 所属「系列」组名（同前缀 / 同 IP 的一组），空串 = 不归组
                 "group": server_group(
                     fav["addr"], fav.get("name") or live.get("name", "")),
+                "players": int(live.get("players") or 0),
+                "maxPlayers": int(live.get("maxPlayers") or 0),
+                "bots": int(live.get("bots") or 0),
+                "ms": int(live.get("ms") or 0),
+                "version": live.get("version", ""),
+                "vac": bool(live.get("vac")),
+                "passworded": bool(live.get("passworded")),
+                "error": live.get("error", ""),
+                "checkedText": live.get("checkedText", ""),
+            })
+
+        # ---- 好友在玩、但还没收藏的服务器，补成额外条目 ----
+        # 这些不是用户收藏的，所以单独标 fromFriend=True，界面上可以据此区分
+        # （比如不给「删除」按钮、排序时归到好友那组）。
+        known = {r["addr"] for r in rows}
+        for addr, pals in fmap.items():
+            if addr in known:
+                continue
+            live = self._live.get(addr) or {}
+            rows.append({
+                "addr": addr,
+                "name": "",
+                "note": "",
+                "weight": 0,
+                "panelCount": 0,
+                "panelUrls": [],
+                "hasPassword": False,
+                "state": live.get("state", "idle"),
+                "liveName": live.get("name", ""),
+                "tag": live.get("tag", ""),
+                "map": live.get("map", ""),
+                "mapName": live.get("mapName", ""),
+                "mapTitle": live.get("mapTitle", ""),
+                "chapter": live.get("chapter", ""),
+                "mode": live.get("mode", ""),
+                "modeLabel": live.get("modeLabel", "未知"),
+                "modeSource": live.get("modeSource", ""),
+                "friends": [p["name"] for p in pals],
+                "friendCount": len(pals),
+                "fromFriend": True,
+                "category": (server_category(live.get("name", "")) or
+                             category_key_for_mode(live.get("mode", "")) or "other"),
+                "group": FRIEND_GROUP_KEY,
                 "players": int(live.get("players") or 0),
                 "maxPlayers": int(live.get("maxPlayers") or 0),
                 "bots": int(live.get("bots") or 0),
@@ -1534,6 +1618,13 @@ class ServerManager(QObject):
 
         out = [{"key": "all", "label": "全部服务器", "kind": "all",
                 "count": len(rows), "addrs": [str(r["addr"]) for r in rows]}]
+        # 「好友在玩」排在「全部」后面、其它合集前面 —— 它是**临时的**，
+        # 好友一退出就没了，所以永远放显眼位置，且只在这一组非空时出现。
+        friend_rows = [r for r in rows if r.get("fromFriend") or r.get("friendCount")]
+        if friend_rows:
+            out.append({"key": FRIEND_GROUP_KEY, "label": FRIEND_GROUP_LABEL,
+                        "kind": "friends", "count": len(friend_rows),
+                        "addrs": [str(r["addr"]) for r in friend_rows]})
         if loose:
             out.append({"key": "none", "label": "未分类", "kind": "none",
                         "count": len(loose), "addrs": loose})
@@ -1569,11 +1660,86 @@ class ServerManager(QObject):
             out.append({"key": "other", "label": "其他", "count": counts["other"]})
         return out
 
+    def _friends_by_addr(self) -> dict[str, list[dict]]:
+        """好友正在玩的服务器：``{addr: [好友...]}``。
+
+        ★ 这里有**一道刻意的取舍**：好友状态要走本机 Steam 的 IPC，
+          慢的时候能卡一两秒。列表是每次 serversChanged 都会被重算的，
+          如果每次都同步去读，界面会一阵一阵地顿。
+          所以：
+            · 结果在 `steamfriends` 里带 60 秒缓存，这里再叠一层 `_friends_map`；
+            · 刷新由 `refreshFriends()` 在后台线程里做（见 core 里的定时器）；
+            · 这个函数只读内存，**绝不发起网络/IPC 调用**。
+        """
+        return dict(getattr(self, "_friends_map", {}) or {})
+
+    def refreshFriends(self) -> dict:
+        """后台刷新好友状态（在 worker 线程里调）。
+
+        读成功后把 `{addr: [好友...]}` 存进 `_friends_map` 并让列表刷新；
+        读失败（Steam 没开 / 缺 DLL）只记状态，不动已有数据。
+        """
+        try:
+            fmap = SF.friends_by_addr(force=True)
+            info = SF.fetch()
+        except Exception as e:  # noqa: BLE001
+            log(f"refreshFriends failed: {e!r}")
+            return {"ok": False, "error": f"读好友失败：{type(e).__name__}",
+                    "count": 0}
+
+        with self._lock:
+            self._friends_map = fmap
+            self._friends_ok = bool(info.get("ok"))
+            self._friends_err = str(info.get("error") or "")
+            self._friends_me = str(info.get("me") or "")
+            all_l4d2 = [f for f in (info.get("friends") or [])
+                        if f.get("playingL4D2")]
+            self._friends_l4d2 = all_l4d2
+            self._friends_at = time.time()
+
+        self.serversChanged.emit()
+        return {"ok": True, "error": "", "count": len(all_l4d2),
+                "servers": len(fmap)}
+
+    @Slot(result="QVariantMap")
+    def refreshFriendsNow(self) -> dict:
+        """界面上的「刷新好友」按钮（同步版，会阻塞一下，按钮点了才调）。"""
+        return self.refreshFriends()
+
+    @Property("QVariantList", notify=serversChanged)
+    def friendsPlaying(self) -> list:
+        """正在玩 L4D2 的好友（全部，不只是有服务器地址的）。
+
+        界面用它在「好友在玩」入口上显示人数，也用来展示「在玩但没共享地址」的人。
+        """
+        return [dict(f) for f in (getattr(self, "_friends_l4d2", []) or [])]
+
+    @Property(int, notify=serversChanged)
+    def friendsPlayingCount(self) -> int:
+        return len(getattr(self, "_friends_l4d2", []) or [])
+
+    @Property(bool, notify=serversChanged)
+    def friendsOk(self) -> bool:
+        """好友数据能不能读到（读不到时界面给一句原因，不显示空的「好友在玩」）。"""
+        return bool(getattr(self, "_friends_ok", False))
+
+    @Property(str, notify=serversChanged)
+    def friendsError(self) -> str:
+        return str(getattr(self, "_friends_err", "") or "")
+
+    @Property(str, notify=serversChanged)
+    def mySteamName(self) -> str:
+        return str(getattr(self, "_friends_me", "") or "")
+
     def _rows_in_group(self, rows: list, group_key: str) -> list:
         """按合集过滤行（和界面上的 `filterByGroup` 同一套语义）。"""
         key = str(group_key or "all")
         if key == "all":
             return rows
+        # 「好友在玩」不是自动合集，它按 friendCount 判断
+        if key == FRIEND_GROUP_KEY:
+            return [r for r in rows
+                    if r.get("fromFriend") or r.get("friendCount")]
         groups = group_servers(rows, self._group_overrides())
         addrs: list[str] = []
         for g in groups:
@@ -1631,7 +1797,12 @@ class ServerManager(QObject):
 
     @Slot(str, result="QVariantMap")
     def addServer(self, text: str) -> dict:
-        """快捷收藏：只给地址（工具栏/IP 直连里顺手存下来的老路）。"""
+        """快捷收藏：只给地址（工具栏/IP 直连里顺手存下来的老路）。
+
+        ★ 默认名不再留空：先查一次服务器，把它**自报的名字**当备注。
+          以前留空 → 列表里只剩一串 IP，一堆服务器分不清谁是谁。
+          查不到（离线 / 超时）才退回空串，界面仍显示地址。
+        """
         try:
             addr = normalize_address(text)
         except ServerError as exc:
@@ -1640,13 +1811,23 @@ class ServerManager(QObject):
         if self._find(rows, addr):
             return {"ok": False, "addr": addr,
                     "error": "这个服务器已经在列表里了"}
-        rows.append({"addr": addr.lower(), "name": "", "weight": 0,
+
+        # 先问一次服务器，用它的真实名字当默认备注（查不到就算了，不阻塞）
+        default_name = ""
+        try:
+            obs = self._query_one_sync(addr)
+            if isinstance(obs, dict) and obs.get("ok"):
+                default_name = str(obs.get("name") or "").strip()
+        except Exception as e:  # noqa: BLE001
+            log(f"addServer default name failed {addr}: {e!r}")
+
+        rows.append({"addr": addr.lower(), "name": default_name, "weight": 0,
                      "panels": []})
         self._save_favorites(rows)
         self.serversChanged.emit()
-        self._set_status(f"已添加 {addr}")
-        self.refreshOne(addr)
-        return {"ok": True, "addr": addr}
+        self._set_status(f"已添加 {addr}"
+                         + (f"（{default_name}）" if default_name else ""))
+        return {"ok": True, "addr": addr, "name": default_name}
 
     # ------------------------------------------------------- 分享 / 剪贴板
     #
@@ -2090,6 +2271,15 @@ class ServerManager(QObject):
             if key in known:
                 skipped += 1
                 continue
+            # 没有名字就现查一次（批量加的时候这一步要几十~几百毫秒，
+            # 但换来的是列表里能认出谁是谁，值得）
+            if not name:
+                try:
+                    obs = self._query_one_sync(key)
+                    if obs.get("ok"):
+                        name = str(obs.get("name") or "").strip()[:40]
+                except Exception:  # noqa: BLE001
+                    pass
             rows.append({"addr": key, "name": name, "weight": 0, "panels": []})
             known.add(key)
             added += 1
@@ -2651,6 +2841,25 @@ class ServerManager(QObject):
         self.serversChanged.emit()
 
     # -------------------------------------------------------------- 查询
+    def _query_one_sync(self, addr: str) -> dict:
+        """只查一次、**不写 `_live`、不发信号**。
+
+        给「添加服务器时取默认名」用：那一步只想知道服务器自报的名字，
+        不该顺手把列表状态改掉（后面 refreshOne 会正式刷一次）。
+        """
+        try:
+            live = query_info(addr)
+        except Exception as e:  # noqa: BLE001
+            log(f"query for default name failed {addr}: {e!r}")
+            return {"ok": False, "error": str(e)}
+        if live.get("ok"):
+            label = map_label(live.get("map") or "")
+            title, chapter = split_map(label)
+            live["mapName"] = label
+            live["mapTitle"] = title
+            live["chapter"] = chapter
+        return live
+
     def _query_one(self, addr: str, with_players: bool = False) -> dict:
         live = query_info(addr)
         if live.get("ok"):
@@ -2683,6 +2892,47 @@ class ServerManager(QObject):
     def shutdown(self) -> None:
         """窗口关掉时调一下，后台线程的收尾 emit 就不再做无用功。"""
         self._closed = True
+
+    # ---------------------------------------------------------- 好友在玩
+    def start_friend_watch(self) -> None:
+        """起一个后台线程，每隔一阵读一次 Steam 好友状态。
+
+        ★ 只在后台线程里读，且只在**数据真的变了**时才 emit ——
+          好友列表是每 90 秒一次，但界面不该被无意义的刷新打断滚动位置。
+        """
+        if getattr(self, "_friend_thread", None) is not None:
+            return
+        self._friend_thread = threading.Thread(
+            target=self._friend_loop, name="friend-watch", daemon=True)
+        self._friend_thread.start()
+
+    def _friend_loop(self) -> None:
+        # 启动后先等一下：这时候主界面还在建，别抢资源
+        time.sleep(6.0)
+        while not self._closed:
+            try:
+                if self._closed:
+                    break
+                before = self._friends_signature()
+                self.refreshFriends()
+                after = self._friends_signature()
+                if before != after and not self._closed:
+                    # 状态真变了才刷新界面（refreshFriends 内部已 emit 过一次，
+                    # 这里不动，避免重复触发打乱列表滚动）
+                    pass
+            except Exception as e:  # noqa: BLE001
+                log(f"friend watch loop: {e!r}")
+            # 分段睡，退出时能及时收尾
+            for _ in range(int(FRIEND_REFRESH_SEC)):
+                if self._closed:
+                    return
+                time.sleep(1.0)
+
+    def _friends_signature(self) -> tuple:
+        """当前好友状态的指纹（用来判断「变了没有」）。"""
+        l4 = getattr(self, "_friends_l4d2", []) or []
+        return tuple(sorted(
+            (str(f.get("sid") or ""), str(f.get("addr") or "")) for f in l4))
 
     @Slot(str)
     def refreshOne(self, addr: str) -> None:

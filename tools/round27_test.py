@@ -119,11 +119,11 @@ def _check():
         check("第二次要么排队、要么直接开跑", True)
 
     core.shutdown()
-    app.quit()
+    core.quitFromWindow()
 
 
 QTimer.singleShot(1200, _go)
-QTimer.singleShot(40000, app.quit)
+QTimer.singleShot(40000, core.quitFromWindow)
 app.exec()
 
 print()

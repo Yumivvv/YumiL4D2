@@ -601,6 +601,20 @@ GridView 的 `model` 一换（追加时把整个数组换掉），滚动位置�
    「#1 co-op game of **2008**」，算出个恒定的 2008。现在改用
    「本页是否满 30 条」判断还有没有下一页（`hasMore`）。
 
+**还有两个坑（v1.0.2 修的）：**
+
+5. **`hasMore` 必须存进缓存**。列表有 10 分钟内存缓存，但缓存里一开始
+   只存了 `ok/items/total/page/error`，第二次进同一页时 `hasMore` 就丢了，
+   上层只能退化成「数本页条数」—— 只要某页恰好不满 30 条（末页常是 28/29 条），
+   就会误判「到底了」。表现是**「最新」排序下点一次就没数据了**。
+   现在缓存里也存 `hasMore`，命中时原样返回。
+
+6. **连不上要有可操作的提示**。`steamcommunity.com` 在国内时不时打不开
+   （DNS 能解析、TCP 超时）。现在会重试一次，两次都失败才报错，
+   并且把话说到点子上：「如果浏览器也打不开 steamcommunity.com，
+   说明当前网络访问不了它，挂个加速器再试」——以前只写 `ConnectTimeout`，
+   用户以为是程序坏了。
+
 抓到卡片后只有 ID / 封面 / 标题，其余字段（体积、作者、订阅数、简介…）
 由 `fetch_details()` 按 ID 批量补齐，那条路一直是官方 `GetPublishedFileDetails`。
 
@@ -725,7 +739,6 @@ v1.5 要 API key + 计费，不是「免注册」能用的东西。所以 MyMemo
 MyMemory 打瘸后腾讯要能顶上、两边都挂时最终报错里不许再出现「403」。
 
 ## 服务器（收藏 + A2S 直查）
-
 左边是收藏的服务器，右边是选中那台的检查面板。页面上的名字、地图、模式、人数都是
 **自己发 UDP 包问服务器**拿到的（Valve 的 A2S 协议），不经过任何第三方接口 ——
 所以看到的是服务器此刻的真实状态，不是某个网站缓存的数据。
@@ -733,6 +746,77 @@ MyMemory 打瘸后腾讯要能顶上、两边都挂时最终报错里不许再�
 ![服务器页](docs/preview-servers.png)
 
 ![添加/编辑服务器](docs/preview-servers-edit.png)
+
+### 好友在玩（不需要 API Key）
+
+「合集」列表里会多出一项 **好友在玩**，专门收「我 Steam 好友正在玩的服务器」。
+同时在服务器卡片的地址行右侧会出现一个小标签，写明是**哪位好友**在玩：
+
+```
+👤 小明 在玩            ← 只有一个人
+👤 小明 等 2 人在玩     ← 同一台服里有好几个人
+```
+
+点标签会把这台服务器上的好友名全部列出来。
+
+#### 数据从哪来
+
+**不联网、不要 API Key、不要密码。** 直接读本机 Steam 客户端：
+
+```
+steamclient64.dll  →  CreateInterface("SteamClient020")
+                   →  CreateSteamPipe / ConnectToGlobalUser   ← 复用当前登录态
+                   →  GetISteamFriends("SteamFriends017")
+                   →  GetFriendGamePlayed()  →  m_gameID / m_unGameIP / m_usGamePort
+```
+
+`GetFriendGamePlayed()` 直接给出好友正在玩的 appid、服务器 IP 和端口 ——
+`m_gameID == 550` 就是 L4D2。这也是**不需要 Web API** 的原因：
+那些信息 Web API 根本不给（`GetPlayerSummaries` 只有 appid，没有地址）。
+
+#### 两个 DLL 的分工（踩过的坑）
+
+| DLL | 位置 | 作用 |
+| --- | --- | --- |
+| `steamclient64.dll` | Steam 根目录，**一定有** | 提供 `CreateInterface` 和接口对象 |
+| `steam_api64.dll` | Steam 根目录**通常没有** | 提供 `SteamAPI_ISteamFriends_*` 扁平包装函数 |
+
+`steam_api64.dll` 是游戏自带的（每个 64 位 Steam 游戏目录里都有一份），
+所以代码会去 `libraryfolders.vdf` 登记的各个库、按
+`<game>/`、`<game>/bin/`、`<game>/bin64/`、`<game>/*/` 四个位置找。
+找到一份就用，并记住路径。
+
+#### 调用形式（尤其反直觉的那条）
+
+```
+GetFriendCount        : (self, flags) -> int
+GetFriendByIndex      : (self, index, flags) -> CSteamID     ★ 是返回值，不是 out 参数
+GetFriendPersonaName  : (self, CSteamID) -> const char*
+GetFriendPersonaState : (self, CSteamID) -> int
+GetFriendGamePlayed   : (self, CSteamID, FriendGameInfo_t*) -> bool
+```
+
+`GetFriendByIndex` 这条折腾了很久：Steamworks 的 **C# 封装**里它是 `out` 参数，
+于是很容易照着写 `fn(self, byref(sid), index, flags)` —— 但 DLL 导出的 C 版本
+是**直接返回 8 字节**。按 out 传会静默失败（out 保持原值）或访问冲突，
+而且报错信息（`reading 0x0` / `writing 0x0`）完全指不到真正原因。
+
+#### 为什么只在后台线程读
+
+好友状态要走本机 IPC，偶尔会卡一两秒；而服务器列表是每次数据变化都会重算的。
+如果放在列表计算里同步读，界面会一阵一阵地顿。
+所以：
+
+- 读操作全在 `friend-watch` 后台线程里（`ServerManager.start_friend_watch()`）；
+- `steamfriends` 内部还有 60 秒缓存，`ServerManager` 再存一份 `_friends_map`；
+- 界面读的 `servers` 只读**内存**，绝不发起 IPC。
+
+#### 内网地址挡掉
+
+好友在局域网里时 Steam 会给出私有地址（`192.168.*`、`10.*`、`100.64.*` CGNAT 等），
+拿这些地址去查询或展示都没意义，所以 `_is_private()` 会过滤掉。
+被过滤的好友仍然计入「N 位好友在玩」，只是不会生成服务器条目 ——
+选择器上会写成 `3 台 · 4 人`，就是为这个情况准备的。
 
 ### 地址怎么写
 
@@ -756,12 +840,21 @@ MyMemory 打瘸后腾讯要能顶上、两边都挂时最终报错里不许再�
 
 | 字段 | 干什么的 |
 | --- | --- |
-| 服务器名称 | 显示在卡片上的名字（留空就显示服务器自己报的名字，再没有就显示地址） |
+| 服务器名称 | 显示在卡片上的名字。**留空时会自动用服务器自报的名字**（见下面那条） |
 | 服务器地址 | 上面那张表里的任意写法，保存时会规范化成 `ip:port` |
 | 排序权重 | 整数，越大越靠前。默认按权重排，权重一样再按人数排 |
 | 高级：面板地址 | 这台服有商店/面板网页就填进来，**可以加多条**（一条一行）；不写协议自动补 `http://` |
 | 高级：面板密码 | 每行一个。**用 Windows 账户的 DPAPI 加密后再存**，配置文件里看不到明文；旁边的「显示」可以把刚敲的内容亮出来核对，点开已保存的行不会回显明文 |
 | 高级：清除已保存的密码 | 勾上就清空这台服存过的所有面板密码 |
+
+> **只填 IP 添加时，名字会自动取服务器自报的那个**（v1.0.2 起）。
+> 以前是存一个空名字，卡片上就只剩一串 `1.2.3.4:27015`，一堆服分不清谁是谁。
+> 现在添加时会先发一次 A2S 查询，把 `A2S_INFO` 里的服务器名当默认备注存下来；
+> 查不到（离线/超时）才留空，这时界面显示地址。
+> 「从文字导入」「批量添加」走的也是同一套逻辑。
+>
+> 顺带：服务器名里常见的 **UTF-8 BOM**（`\ufeff〖黑喵0〗多人多特` 开头那个看不见的字符）
+> 会被 `clean_name()` 去掉。不去的话名字排序会错位、卡片标题像多了一个空格。
 
 > 为什么密码要加密：`config.json` 是明文 JSON，直接写密码等于把密码摊在桌面上。
 > 用 DPAPI（`CryptProtectData`）绑当前 Windows 账户加密，换台电脑或换个账户就解不开 ——
@@ -2395,8 +2488,22 @@ MOD 直接下到 `addons/`。**单个 MOD 和合集都支持。**
 | --- | --- |
 | `F5` | 立即检查新视频 |
 | `Esc` | 关闭筛选面板 / UP 主卡片 / 播放器 / 简介面板 / 设置面板（按这个顺序） |
-| `Ctrl+F` | 清空搜索与筛选、回到「全部视频」 |
+| `Ctrl+F` | 视频页：清空搜索与筛选、回到「全部视频」；服务器页：聚焦搜索框 |
+| `Ctrl+C` | 服务器页：复制当前选中那台的分享文本（见下） |
+| `Ctrl+J` | 打开 / 关闭下载页 |
 | `Space` | 播放器打开时：播放 / 暂停 |
+| `←` `→` `↑` `↓` | 播放器打开时：快退 / 快进 10 秒、音量 ±10 |
+
+### Ctrl+C 复制选中服务器
+
+服务器页选中某一台后按 `Ctrl+C`，会把这台的分享文本（名字、地址、地图、
+模式、`connect ...` 一行）直接复制到剪贴板，弹一句 toast 就完事，
+不弹窗 —— 它和卡片上那颗「分享」按钮的区别就在这里：
+按钮是「给我看看再复制」，`Ctrl+C` 是「我已经选好了，直接给我」。
+
+⚠️ **在搜索框里按 `Ctrl+C` 不会被抢**：QML 里先看当前焦点是不是输入类控件
+（有 `selectedText` / `cursorPosition` / `text` 属性），是就放行交给 Qt，
+否则才去复制服务器。不然用户想复制输入框里的文字会被莫名其妙换成服务器地址。
 
 ## 文件说明
 
@@ -2416,7 +2523,8 @@ Yumi的L4D2工具箱/
 │  ├─ workshop_dl.py   工坊详情、下载直链、下载线程池
 │  ├─ workshop_dns.py  工坊 DNS（自己发查询报文，可自定义服务器）
 │  ├─ imageproxy.py    本机封面压缩代理（Pillow 缩放 + 内存/磁盘缓存）
-│  ├─ servers.py       服务器：A2S 直查、收藏、模式/地图解析、Steam 直连
+│  ├─ servers.py       服务器：A2S 直查、收藏、模式/地图解析、Steam 直连、好友在玩
+│  ├─ steamfriends.py  读本机 Steam 好友状态（ctypes 调 steamclient64.dll，不要 key）
 │  ├─ core.py          业务逻辑 + 数据模型
 │  ├─ store.py         配置与视频库持久化
 │  ├─ notifier.py      Windows Toast 通知

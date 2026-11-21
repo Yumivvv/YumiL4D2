@@ -306,6 +306,28 @@ def main() -> int:
             log("servers", MODE, "count =", mgr.serverCount,
                 "online =", mgr.onlineCount, "players =", mgr.totalPlayers,
                 "status =", mgr.statusText)
+            # 好友在玩：EXTRA 带 friends 时注入假数据（真读 Steam 要等好友上线，
+            # 截图验收不能依赖那个）。只影响内存，不写配置。
+            if EXTRA == "friends":
+                rows = mgr.servers
+                fake_map = {}
+                if rows:
+                    fake_map[rows[0]["addr"]] = [{"name": "小明"},
+                                                 {"name": "阿强"}]
+                if len(rows) > 1:
+                    fake_map[rows[1]["addr"]] = [{"name": "老王"}]
+                # 再造一个「只有好友在玩、没收藏」的服务器
+                fake_map["103.44.156.99:27015"] = [{"name": "夜猫子"}]
+                mgr._friends_map = fake_map
+                mgr._friends_ok = True
+                mgr._friends_err = ""
+                mgr._friends_me = "Yumi"
+                mgr._friends_l4d2 = [{"name": n} for v in fake_map.values()
+                                     for n in [x["name"] for x in v]]
+                mgr.serversChanged.emit()
+                wait_ms(500)
+                log("  injected friends:", {k: [x["name"] for x in v]
+                                            for k, v in fake_map.items()})
             page = win.findChild(QObject, "serversPage")
             if MODE == "servers-picked" and page is not None and mgr.servers:
                 page.selectServer(mgr.servers[0])

@@ -106,7 +106,7 @@ def run():
     log("列表条数:", count)
     if count < 10:
         log("  [warn] 视频太少，跳过（至少 10 条才能验证滚动）")
-        app.quit()
+        core.quitFromWindow()
         return
 
     # 滚到中间：直接设 contentY，等价于用户拖滚动条
@@ -139,9 +139,9 @@ def run():
 
     log()
     log("通过：点开详情后滚动位置保持住了")
-    app.quit()
+    core.quitFromWindow()
 
 
 QTimer.singleShot(300, run)
-QTimer.singleShot(90000, app.quit)
+QTimer.singleShot(90000, core.quitFromWindow)
 app.exec()

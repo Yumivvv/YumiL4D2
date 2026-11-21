@@ -538,9 +538,9 @@ def run():
 
     log()
     log("全部通过")
-    app.quit()
+    core.quitFromWindow()
 
 
 QTimer.singleShot(500, run)
-QTimer.singleShot(120000, app.quit)
+QTimer.singleShot(120000, core.quitFromWindow)
 app.exec()

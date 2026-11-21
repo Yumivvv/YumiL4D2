@@ -169,9 +169,9 @@ def run():
     log()
     log("全部通过")
     core.shutdown()
-    app.quit()
+    core.quitFromWindow()
 
 
 QTimer.singleShot(300, run)
-QTimer.singleShot(90000, app.quit)
+QTimer.singleShot(90000, core.quitFromWindow)
 app.exec()

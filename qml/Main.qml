@@ -2535,7 +2535,7 @@ Window {
                         anchors.left: parent.left
                         anchors.leftMargin: 19
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "监控与提醒"
+                        text: "① 监控与提醒"
                         color: Theme.text
                         font.family: Theme.uiFont
                         font.pixelSize: 12
@@ -3094,7 +3094,7 @@ Window {
                         anchors.left: parent.left
                         anchors.leftMargin: 19
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "外观与主题"
+                        text: "② 外观与主题"
                         color: Theme.text
                         font.family: Theme.uiFont
                         font.pixelSize: 12
@@ -3663,7 +3663,7 @@ Window {
                         anchors.left: parent.left
                         anchors.leftMargin: 19
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "目录与网络"
+                        text: "③ 目录与网络"
                         color: Theme.text
                         font.family: Theme.uiFont
                         font.pixelSize: 12
@@ -4319,7 +4319,7 @@ Window {
                         anchors.left: parent.left
                         anchors.leftMargin: 19
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "数据与缓存"
+                        text: "④ 数据与缓存"
                         color: Theme.text
                         font.family: Theme.uiFont
                         font.pixelSize: 12
@@ -4525,7 +4525,7 @@ Window {
                         anchors.left: parent.left
                         anchors.leftMargin: 19
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "关于"
+                        text: "⑤ 关于"
                         color: Theme.text
                         font.family: Theme.uiFont
                         font.pixelSize: 12
@@ -4535,9 +4535,18 @@ Window {
 
                 // 作者 + 版本 + 主页。文案全部来自 core.about*（见 app/core.py），
                 // 这里只负责排版 —— 以后改名/换仓库地址不用在 QML 里再找一遍。
+                // 作者 + 版本 + 主页 + 致谢。文案全部来自 core.about* / core.credit*
+                // （见 app/core.py），这里只负责排版。
+                //
+                // ★ 这一版重排过：
+                //   · 三个按钮原来各占一整行（「复制链接」「打开数据目录」「检查更新」），
+                //     整块又高又空，看着别扭 —— 现在收成一行紧凑小按钮；
+                //   · 致谢只留一句「技术参考 LytVPK（作者 LaoYutang）」，
+                //     原来那一大段「参考范围」在 README 里已经有了，
+                //     设置页里没必要再铺一遍，反而把卡片撑得老长。
                 Rectangle {
                     width: parent.width
-                    height: aboutCol.implicitHeight + 32
+                    height: aboutCol.implicitHeight + 28
                     radius: Theme.radiusS
                     color: Theme.scrim(0.035)
                     border.width: 1
@@ -4550,8 +4559,9 @@ Window {
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.leftMargin: 16
                         anchors.rightMargin: 16
-                        spacing: 10
+                        spacing: 12
 
+                        // ---- 第一行：图标 + 名字 + 版本 ----
                         Row {
                             spacing: 10
                             Rectangle {
@@ -4588,10 +4598,10 @@ Window {
                             }
                         }
 
-                        // GitHub 主页：整行可点（直接开浏览器），右边再给一颗「复制」
+                        // ---- 第二行：GitHub 主页（整行可点）----
                         Rectangle {
                             width: parent.width
-                            height: 36
+                            height: 34
                             radius: Theme.radiusXS
                             color: ghMa.containsMouse ? Theme.scrim(0.075) : Theme.scrim(0.035)
                             border.width: 1
@@ -4604,28 +4614,18 @@ Window {
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: 8
                                 Text {
-                                    text: "\uE774"   // GitHub 那条链子图标（Segoe Fluent Icons）
+                                    text: "\uE774"   // GitHub 链子图标
                                     color: Theme.textMute
                                     font.family: Theme.iconFont
                                     font.pixelSize: 12
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
-                                Column {
+                                Text {
                                     anchors.verticalCenter: parent.verticalCenter
-                                    spacing: 1
-                                    Text {
-                                        text: "GitHub"
-                                        color: Theme.text
-                                        font.family: Theme.uiFont
-                                        font.pixelSize: 11
-                                        font.weight: Font.DemiBold
-                                    }
-                                    Text {
-                                        text: core.aboutHomepageText
-                                        color: Theme.textMute
-                                        font.family: Theme.monoFont
-                                        font.pixelSize: 10
-                                    }
+                                    text: core.aboutHomepageText
+                                    color: Theme.text
+                                    font.family: Theme.monoFont
+                                    font.pixelSize: 10
                                 }
                             }
 
@@ -4636,7 +4636,7 @@ Window {
                                 text: "打开"
                                 color: Theme.accent
                                 font.family: Theme.uiFont
-                                font.pixelSize: 11
+                                font.pixelSize: 10
                                 font.weight: Font.DemiBold
                             }
 
@@ -4649,175 +4649,100 @@ Window {
                             }
                         }
 
+                        // ---- 第三行：三个操作收成一行小按钮 ----
+                        // 原来各占一整行，整块又高又空；现在等分一行，
+                        // 高度也从 32 收到 28，视觉上紧凑很多。
                         Row {
                             width: parent.width
                             spacing: 8
+
                             ActionButton {
+                                objectName: "copyHomepageBtn"
                                 label: "复制链接"
                                 accent: false
-                                width: (parent.width - 8) / 2
-                                height: 32
+                                width: (parent.width - 16) / 3
+                                height: 28
                                 onClicked: core.copyHomepage()
                             }
                             ActionButton {
-                                label: "打开数据目录"
+                                objectName: "openDataDirBtn"
+                                label: "数据目录"
                                 accent: false
-                                width: (parent.width - 8) / 2
-                                height: 32
+                                width: (parent.width - 16) / 3
+                                height: 28
                                 onClicked: core.openDataDir()
+                            }
+                            ActionButton {
+                                objectName: "checkUpdateBtn"
+                                width: (parent.width - 16) / 3
+                                height: 28
+                                label: core.updateChecking ? "检查中…" : "检查更新"
+                                accent: core.updateInfo.has_update
+                                enabledBtn: !core.updateChecking
+                                onClicked: core.checkUpdate()
                             }
                         }
 
-                        // 检查更新：走 GitHub Releases（网络逻辑见 app/updater.py）。
-                        // ★ 点按钮只发起后台检查，**不弹窗**；只有确实发现新版本时
-                        //   由 core.updatePrompt 触发弹窗（见下方 Connections）。
-                        ActionButton {
-                            objectName: "checkUpdateBtn"
-                            width: parent.width
-                            height: 32
-                            label: core.updateChecking ? "正在检查…" : "检查更新"
-                            accent: core.updateInfo.has_update
-                            enabledBtn: !core.updateChecking
-                            onClicked: core.checkUpdate()
-                        }
-
-                        // ---- 致谢（技术参考）----
-                        // 文案全部来自 core.credit*（见 app/core.py），QML 只排版。
+                        // ---- 第四行：致谢（一句话，不铺参考范围）----
+                        // 完整的技术参考清单在 README 的「致谢」一节 + 各源文件注释里，
+                        // 设置页只需要让用户看到「这个项目参考过谁」。
                         Rectangle {
                             objectName: "creditBox"
                             width: parent.width
-                            height: creditCol.implicitHeight + 24
+                            height: 30
                             radius: Theme.radiusXS
-                            color: Theme.scrim(0.03)
+                            color: crMa.containsMouse ? Theme.scrim(0.075)
+                                                      : Theme.scrim(0.025)
                             border.width: 1
-                            border.color: Theme.border
+                            border.color: crMa.containsMouse ? Theme.borderHi : Theme.border
+                            Behavior on color { ColorAnimation { duration: 90 } }
 
-                            Column {
-                                id: creditCol
+                            Row {
                                 anchors.left: parent.left
+                                anchors.leftMargin: 10
                                 anchors.right: parent.right
+                                anchors.rightMargin: 10
                                 anchors.verticalCenter: parent.verticalCenter
-                                anchors.leftMargin: 12
-                                anchors.rightMargin: 12
                                 spacing: 6
 
-                                Row {
-                                    spacing: 6
-                                    Text {
-                                        text: "\uE8F1"   // 心形 / 致谢图标
-                                        color: Theme.accent
-                                        font.family: Theme.iconFont
-                                        font.pixelSize: 11
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-                                    Text {
-                                        text: "致谢"
-                                        color: Theme.textDim
-                                        font.family: Theme.uiFont
-                                        font.pixelSize: 11
-                                        font.weight: Font.DemiBold
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
+                                Text {
+                                    text: "\uE8F1"   // 心形
+                                    color: Theme.accent
+                                    font.family: Theme.iconFont
+                                    font.pixelSize: 10
+                                    anchors.verticalCenter: parent.verticalCenter
                                 }
-
                                 Text {
                                     objectName: "creditTextLabel"
-                                    width: parent.width
-                                    text: core.creditText
-                                    color: Theme.text
+                                    width: parent.width - 60
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "技术参考 " + core.creditName
+                                          + "（作者 " + core.creditAuthor + "）"
+                                    color: Theme.textDim
                                     font.family: Theme.uiFont
                                     font.pixelSize: 10
-                                    wrapMode: Text.Wrap
-                                    lineHeight: 1.45
+                                    elide: Text.ElideRight
                                 }
-
                                 Text {
-                                    objectName: "creditScopeLabel"
-                                    width: parent.width
-                                    text: core.creditScope
-                                    color: Theme.textMute
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "打开"
+                                    color: Theme.accent
                                     font.family: Theme.uiFont
                                     font.pixelSize: 10
-                                    wrapMode: Text.Wrap
-                                    lineHeight: 1.45
+                                    font.weight: Font.DemiBold
                                 }
+                            }
 
-                                // 项目地址：整行可点（开浏览器），右侧「复制」
-                                Rectangle {
-                                    objectName: "creditLink"
-                                    width: parent.width
-                                    height: 32
-                                    radius: Theme.radiusXS
-                                    color: crMa.containsMouse ? Theme.scrim(0.075)
-                                                             : Theme.scrim(0.035)
-                                    border.width: 1
-                                    border.color: crMa.containsMouse ? Theme.borderHi
-                                                                     : Theme.border
-                                    Behavior on color { ColorAnimation { duration: 90 } }
-
-                                    Row {
-                                        anchors.left: parent.left
-                                        anchors.leftMargin: 10
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        spacing: 7
-                                        Text {
-                                            text: "\uE774"   // GitHub 链子图标
-                                            color: Theme.textMute
-                                            font.family: Theme.iconFont
-                                            font.pixelSize: 11
-                                            anchors.verticalCenter: parent.verticalCenter
-                                        }
-                                        Column {
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            spacing: 1
-                                            Text {
-                                                text: core.creditName
-                                                color: Theme.text
-                                                font.family: Theme.uiFont
-                                                font.pixelSize: 10
-                                                font.weight: Font.DemiBold
-                                            }
-                                            Text {
-                                                text: core.creditHomepageText
-                                                color: Theme.textMute
-                                                font.family: Theme.monoFont
-                                                font.pixelSize: 9
-                                            }
-                                        }
-                                    }
-
-                                    Text {
-                                        objectName: "creditOpenLabel"
-                                        anchors.right: parent.right
-                                        anchors.rightMargin: 10
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: "打开"
-                                        color: Theme.accent
-                                        font.family: Theme.uiFont
-                                        font.pixelSize: 10
-                                        font.weight: Font.DemiBold
-                                    }
-
-                                    MouseArea {
-                                        id: crMa
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: core.openCreditPage()
-                                    }
-                                }
-
-                                ActionButton {
-                                    objectName: "creditCopyBtn"
-                                    width: parent.width
-                                    height: 28
-                                    accent: false
-                                    label: "复制致谢项目地址"
-                                    onClicked: core.copyCredit()
-                                }
+                            MouseArea {
+                                id: crMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: core.openCreditPage()
                             }
                         }
 
+                        // ---- 第五行：许可 ----
                         Text {
                             width: parent.width
                             text: "本程序按 GPL-3.0 发布，源码在 GitHub 上可以随便看、随便改；"
@@ -6723,6 +6648,26 @@ Window {
                 return;
             win.page = 0;
             core.setShowOnlyNew(false);
+        }
+    }
+
+    // Ctrl+C：在服务器页「选中了某一台」时，直接复制它的分享文本。
+    //
+    // ★ 为什么要在 QML 里判断焦点：Ctrl+C 是系统级复制，用户在搜索框里
+    //   选了一段文字按 Ctrl+C，理应复制文字，不能被我们抢去复制服务器。
+    //   所以这里先看「当前焦点是不是输入框」，是就放行，交给 Qt 自己处理。
+    Shortcut {
+        sequences: ["Ctrl+C"]
+        enabled: win.section === 3
+        onActivated: {
+            var focused = win.activeFocusItem;
+            // 输入类控件（TextInput / TextEdit / TextArea 等）一律不抢
+            if (focused && (focused.hasOwnProperty("selectedText")
+                            || focused.hasOwnProperty("cursorPosition")
+                            || focused.hasOwnProperty("text")))
+                return;
+            if (serversPageItem && serversPageItem.copySelected)
+                serversPageItem.copySelected();
         }
     }
 

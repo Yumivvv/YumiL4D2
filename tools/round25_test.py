@@ -129,11 +129,11 @@ def _measure():
 
 def _done():
     core.shutdown()
-    app.quit()
+    core.quitFromWindow()
 
 
 QTimer.singleShot(1500, phase_long_text)
-QTimer.singleShot(20000, app.quit)
+QTimer.singleShot(20000, core.quitFromWindow)
 app.exec()
 
 

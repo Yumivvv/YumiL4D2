@@ -30,6 +30,7 @@ except Exception:
     pass
 
 import os
+import tempfile
 # Windows 控制台默认 GBK，先把输出换成 UTF-8（否则非 GBK 字符会让测试崩在中途）
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
@@ -273,7 +274,9 @@ def main() -> int:
         print("  [skip] 合成鼠标这次没落到轨底（坐标随内容高度变化，不影响结论）")
         print("         换算公式已单独验证通过，所以这里不算失败。")
     # 留一张「拖到底」的图：抽屉最底部那几节应该真的露出来了
-    shot_path = os.path.join(ROOT, "data", "drag_bottom.png")
+    # ★ 写到临时目录，不要写进 data/ —— 那是用户的数据目录，
+    #   之前这里会留下一个 drag_bottom.png，既没用又混在配置里。
+    shot_path = os.path.join(tempfile.gettempdir(), "yscroll_drag_bottom.png")
     try:
         win.grabPreview(shot_path)
         wait(1200)

@@ -316,6 +316,29 @@ Item {
         }
     }
 
+    // Ctrl+C：把**当前选中**那台服务器的分享文本直接复制走（不弹窗）。
+    //
+    // 和上面 askShare 的区别：askShare 会给「分享」弹窗，让人看全文再自己复制；
+    // Ctrl+C 是「我已经选好了，直接给我」的手快手路径，所以只要一句 toast。
+    // 返回 true 表示确实处理了（调用方据此决定要不要吞掉这次按键）。
+    function copySelected() {
+        if (!page.mgr)
+            return false
+        var row = page.selected
+        if (!row || !(row.addr || "").length) {
+            page.hintText = "先选中一台服务器，再按 Ctrl+C 复制"
+            page.hintAt = Date.now()
+            return false
+        }
+        var res = page.mgr.shareServer(row.addr)
+        if (!res || res.ok !== true) {
+            page.hintText = (res && res.error) || "复制失败"
+            page.hintAt = Date.now()
+            return false
+        }
+        return true
+    }
+
     function openPaste() {
         page.pasteText = ""
         page.pasteInfo = ({})
@@ -419,7 +442,13 @@ Item {
         if (!row) return ""
         if ((row.name || "").length > 0)
             return row.name
-        return (row.liveName || "").length > 0 ? row.liveName : row.addr
+        if ((row.liveName || "").length > 0)
+            return row.liveName
+        // 「好友在玩」里那些没收藏的服务器：标题给一句人话，
+        // 别只剩一串 IP（那样看不出这条为什么会出现）。
+        if (row.fromFriend && (row.friends || []).length > 0)
+            return (row.friends || []).join("、") + " 在玩"
+        return row.addr
     }
 
     function mapText(row) {
@@ -428,6 +457,39 @@ Item {
             return row.mapTitle + ((row.chapter || "").length > 0 ? " · " + row.chapter : "")
         return row.map || "地图未知"
     }
+
+    // ---- 好友在玩 ----
+
+    // 卡片上那个小标签的文字：「小明 在玩」/「小明 等 2 人在玩」
+    // 名字太长就截断，卡片那一行放不下太多字。
+    function friendTagText(row) {
+        if (!row) return ""
+        var fs = row.friends || []
+        if (fs.length === 0) return ""
+        var first = String(fs[0] || "")
+        if (first.length > 8) first = first.substr(0, 7) + "…"
+        if (fs.length === 1) return first + " 在玩"
+        return first + " 等 " + fs.length + " 人在玩"
+    }
+
+    // 点好友标签：把全部好友名报出来（走 core 的 toast，不弹大弹窗）
+    function showFriendNames(row) {
+        if (!row) return
+        var fs = row.friends || []
+        if (fs.length === 0) return
+        var names = fs.join("、")
+        var txt = fs.length === 1 ? (names + " 正在这台服务器上玩")
+                                  : (fs.length + " 位好友在这台服务器上：" + names)
+        if (core && core.toast) core.toast(txt, "info")
+        else page.statusText = txt
+    }
+
+    // 好友状态的总览（合集选择器 / 空状态提示用）
+    readonly property int friendPlayingCount: core.servers
+                                              ? core.servers.friendsPlayingCount : 0
+    readonly property bool friendsOk: core.servers ? core.servers.friendsOk : false
+    readonly property string friendsError: core.servers ? core.servers.friendsError : ""
+    readonly property string mySteamName: core.servers ? core.servers.mySteamName : ""
 
     function selectServer(row) {
         page.selected = row
@@ -2675,11 +2737,20 @@ Item {
                                 Text {
                                     // 整组都在同一台机器上（同 IP 不同端口）时额外标一下，
                                     // 让「模式不同但同一个服主」这件事一眼看得出来。
-                                    text: modelData.count + " 台"
-                                          + (modelData.host ? " · 同 IP" : "")
+                                    // 「好友在玩」这组额外带上总人数 —— 有时好友在玩但
+                                    // 没共享服务器地址，那台就不会出现在列表里，
+                                    // 只报「N 台」会让人以为漏了。
+                                    text: modelData.kind === "friends"
+                                          ? (modelData.count + " 台"
+                                             + (page.friendPlayingCount > modelData.count
+                                                ? " · " + page.friendPlayingCount + " 人"
+                                                : ""))
+                                          : (modelData.count + " 台"
+                                             + (modelData.host ? " · 同 IP" : ""))
                                     width: parent.width
                                     elide: Text.ElideRight
-                                    color: Theme.textMute
+                                    color: modelData.kind === "friends"
+                                           ? page.accent : Theme.textMute
                                     font.family: Theme.uiFont
                                     font.pixelSize: 9
                                 }
@@ -2698,6 +2769,7 @@ Item {
                                 anchors.bottom: parent.bottom
                                 width: 20
                                 visible: modelData.kind !== "all" && modelData.kind !== "none"
+                                         && modelData.kind !== "friends"
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 ToolTip.visible: containsMouse
@@ -3339,7 +3411,7 @@ Item {
                             elide: Text.ElideRight
                         }
 
-                        // ---- 第 4 行：只放地址
+                        // ---- 第 4 行：地址 +（有好友时）好友在那玩
                         // 信号格 / 延迟 / 检查时间已经挪到**右侧数据区**的下面一行
                         // （见 bigInfo 里的信号行）。
                         //
@@ -3347,15 +3419,74 @@ Item {
                         //   右边界是 bigInfo.left —— 也就是卡片**中间**，
                         //   所以视觉上「延迟和时间停在中间」，并没有贴到卡片右侧。
                         //   挪进 bigInfo 后就是真正贴着卡片右端了。
-                        Text {
+                        Row {
                             width: parent.width
                             height: 14
-                            verticalAlignment: Text.AlignVCenter
-                            text: modelData.addr
-                            color: Theme.textMute
-                            font.family: Theme.monoFont
-                            font.pixelSize: 10
-                            elide: Text.ElideRight
+                            spacing: 6
+
+                            Text {
+                                // 有好友时让出一点宽度给右边的好友标签
+                                width: parent.width - (friendTag.visible
+                                                       ? friendTag.width + 6 : 0)
+                                height: 14
+                                verticalAlignment: Text.AlignVCenter
+                                text: modelData.addr
+                                color: Theme.textMute
+                                font.family: Theme.monoFont
+                                font.pixelSize: 10
+                                elide: Text.ElideRight
+                            }
+
+                            // ---- 好友在玩标签（"小明 等 2 人在玩"）----
+                            // 只在 modelData.friends 非空时出现。
+                            // 这是这轮新增功能在卡片上的**唯一可见标记**：
+                            // 一眼就能看出「这台服里有我认识的人」。
+                            Rectangle {
+                                id: friendTag
+                                objectName: "friendTag"
+                                visible: (modelData.friends || []).length > 0
+                                height: 14
+                                width: visible ? (friendIcon.width
+                                                  + friendTxt.implicitWidth + 12) : 0
+                                radius: 7
+                                color: Qt.rgba(page.accent.r, page.accent.g,
+                                               page.accent.b, 0.18)
+                                border.width: 1
+                                border.color: Qt.rgba(page.accent.r, page.accent.g,
+                                                      page.accent.b, 0.42)
+
+                                Row {
+                                    anchors.centerIn: parent
+                                    spacing: 3
+
+                                    Text {
+                                        id: friendIcon
+                                        text: "\uE748"   // 人形图标
+                                        color: page.accent
+                                        font.family: Theme.iconFont
+                                        font.pixelSize: 9
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    Text {
+                                        id: friendTxt
+                                        text: page.friendTagText(modelData)
+                                        color: page.accent
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: 9
+                                        font.weight: Font.DemiBold
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                }
+
+                                // 鼠标停上去看全部好友名
+                                MouseArea {
+                                    id: friendHH
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: page.showFriendNames(modelData)
+                                }
+                            }
                         }
 
                     }
@@ -3426,14 +3557,21 @@ Item {
                             glyph: "\uE70F"
                             tip: "编辑"
                             boxSize: 22
+                            // 「好友在玩」里没收藏的服务器没有可编辑的资料
+                            // （它不在配置里，改不了名字/权重/面板）
+                            visible: !srvCard.modelData.fromFriend
                             onClicked: page.openAddDialog(srvCard.modelData)
                         }
                         IconButton {
                             objectName: "srvCardRemove"
                             glyph: "\uE711"
-                            tip: "移出列表"
+                            tip: srvCard.modelData.fromFriend ? "好友退出后自动消失"
+                                                             : "移出列表"
                             boxSize: 22
-                            danger: true
+                            danger: !srvCard.modelData.fromFriend
+                            // 好友服务器是临时的：删不了（也不该删，
+                            // 它来自 Steam 的实时状态，好友一退就自己没了）
+                            enabledBtn: !srvCard.modelData.fromFriend
                             onClicked: {
                                 page.mgr.removeServer(srvCard.modelData.addr)
                                 if (page.selected && page.selected.addr === srvCard.modelData.addr)

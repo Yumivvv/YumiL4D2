@@ -603,6 +603,13 @@ class ModManager(QObject):
 
         self._all_local = local
         self._all_workshop = workshop
+        # ★ 扫完了但用户已经关窗口 → 别再碰模型。
+        #   shutdown() 只置了 _closing，而这条路径以前不检查它：
+        #   窗口一关，QML 对象很快被销毁，这里再调 _apply_filter() 就会
+        #   beginResetModel() 打到一个已析构的 ModListModel 上，
+        #   报 "Internal C++ object (ModListModel) already deleted"。
+        if self._closing:
+            return
         self._apply_filter()
 
         self._last_scan_ts = int(time.time())

@@ -124,7 +124,7 @@ def finish():
         print("  QML 告警:", bad[:3], flush=True)
         fails.append("QML 告警")
     core.shutdown()
-    app.quit()
+    core.quitFromWindow()
     print()
     if fails:
         print("失败 %d 项：%s" % (len(fails), fails))
@@ -133,5 +133,5 @@ def finish():
 
 
 QTimer.singleShot(2400, phase1)
-QTimer.singleShot(28000, app.quit)
+QTimer.singleShot(28000, core.quitFromWindow)
 app.exec()

@@ -40,6 +40,14 @@ def log(*a):
 
 def step1():
     it = core.library.all_items()
+    # ★ 视频库为空时必须优雅跳过，不能 it[0] 直接崩。
+    #   以前测试机库是空的就 IndexError，而异常发生在 QTimer 回调里、
+    #   事件循环还在跑，于是进程一直挂着等 30 秒超时（看起来像「测试卡死」）。
+    if not it:
+        log("[skip] 视频库是空的，没法测播放（先抓一次视频再跑）")
+        # 仍然把「关闭」那条路径走一遍，保证 stop()/清空流地址是对的
+        QTimer.singleShot(200, step3)
+        return
     log("播放:", it[0]["bvid"], it[0]["title"][:30])
     p.open(it[0]["bvid"], it[0]["title"])
 
@@ -63,10 +71,15 @@ def step3():
     log("stop 后 ready:", p.ready, "streaming:", p.streaming, "playing:", p.playing)
     stream_url = getattr(p, "_stream_url", "")
     log("stream_url 已清空:", stream_url == "")
-    app.quit()
+    # ★ 不用 app.quit()：它会给窗口发 close，而 QML 的 onClosing 在
+    #   「收进托盘」模式（默认）下会拦下来，事件循环退不出去 → 进程挂住。
+    #   这个脚本的结论已经打印完，直接退。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 QTimer.singleShot(800, step1)
 QTimer.singleShot(6000, step2)
 QTimer.singleShot(11000, step3)
-QTimer.singleShot(30000, app.quit)
+QTimer.singleShot(30000, lambda: os._exit(1))
 app.exec()

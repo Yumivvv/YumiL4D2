@@ -170,9 +170,16 @@ def run():
     log()
     log("全部通过")
     core.shutdown()
-    app.quit()
+    # ★ 用 os._exit 直接走，不要 app.quit()。
+    #   app.quit() 会给窗口发 close 事件，而 QML 的 onClosing 在
+    #   「收进托盘」模式下会 accepted=false 把它拦下来 —— 事件循环退不出去，
+    #   脚本明明跑完了（输出「全部通过」）却挂在那里，看起来像超时。
+    #   这个脚本的结论已经全部打印完了，不需要优雅收尾。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 QTimer.singleShot(300, run)
-QTimer.singleShot(90000, app.quit)
+QTimer.singleShot(90000, lambda: os._exit(1))
 app.exec()

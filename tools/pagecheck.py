@@ -67,9 +67,14 @@ def run():
     win.setProperty("section", 0)
     wait(600)
     log("OK")
-    app.quit()
+    # 直接退：app.quit() 会被 QML onClosing（收进托盘模式）拦住，退不出去
+    import os
+    import sys
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 QTimer.singleShot(300, run)
-QTimer.singleShot(60000, app.quit)
+QTimer.singleShot(60000, lambda: __import__("os")._exit(1))
 app.exec()

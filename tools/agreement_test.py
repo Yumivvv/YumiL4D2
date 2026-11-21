@@ -194,7 +194,7 @@ def finish():
     except Exception:                        # noqa: BLE001
         pass
     core.shutdown()
-    app.quit()
+    core.quitFromWindow()
     print()
     if fails:
         print("失败 %d 项：%s" % (len(fails), fails))
@@ -203,5 +203,5 @@ def finish():
 
 
 QTimer.singleShot(2400, phase1)
-QTimer.singleShot(25000, app.quit)
+QTimer.singleShot(25000, core.quitFromWindow)
 app.exec()

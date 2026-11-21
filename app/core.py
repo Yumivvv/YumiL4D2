@@ -71,6 +71,7 @@ from .util import (
     fmt_rel,
     fmt_ts,
     norm_url,
+    trim_cover_cache,
 )
 from .wallpaper import (
     BG_STEM,
@@ -303,6 +304,19 @@ class Core(QObject):
         self._player_obj = VideoPlayer(self, config=self.config)
         self._mods = ModManager(self)
         self._servers = ServerManager(self)
+        # 好友状态后台刷新（读本机 Steam，见 app/steamfriends.py）。
+        # 起来就挂着，Steam 没开时它自己会安静地失败，不会烦用户。
+        try:
+            self._servers.start_friend_watch()
+        except Exception as e:  # noqa: BLE001
+            log(f"friend watch start failed: {e!r}")
+        # 封面缓存超过上限就在后台清一次（见 util.trim_cover_cache）。
+        # 放线程里 + 先 sleep，避免和启动时的扫盘/封面下载抢磁盘。
+        try:
+            threading.Thread(target=self._trim_cover_cache_async,
+                             name="cover-trim", daemon=True).start()
+        except Exception as e:  # noqa: BLE001
+            log(f"cover trim start failed: {e!r}")
         # 统一下载队列：MOD / 视频的下载都从这里走，界面只看这一份数据
         self._downloads = DownloadManager(self)
         self._downloads.toastRequested.connect(self.toast)
@@ -2044,6 +2058,29 @@ class Core(QObject):
         return d
 
     # ================================================================= 封面
+    def _trim_cover_cache_async(self) -> None:
+        """启动后台清一次封面缓存（超过 300MB 就删到 220MB 以下）。
+
+        ★ 为什么要等一会儿再动手：启动阶段正在扫盘 + 下载封面，
+          这时候删文件既抢磁盘、又可能把刚下好的删掉。等 20 秒，
+          让启动那波忙完再清。
+
+        ★ 为什么按 atime 排序：封面按 bvid 落盘、文件名不带时间信息，
+          mtime 全是「下载时刻」，拿来排序没意义。见 util.trim_cover_cache。
+        """
+        try:
+            import time as _t
+            _t.sleep(20.0)
+            if self._closing:
+                return
+            freed = trim_cover_cache()
+            if freed > 0:
+                log(f"cover cache trimmed, freed {human_bytes(freed)}")
+                # 缓存大小变了，设置页那个数字要跟着刷新
+                self.cacheChanged.emit()
+        except Exception as e:  # noqa: BLE001
+            log(f"cover trim failed: {e!r}")
+
     def _download_covers(self, bvids: list[str]) -> None:
         for bvid in bvids:
             rec = self.library.videos.get(bvid)

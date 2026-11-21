@@ -157,9 +157,13 @@ def run():
 
     log()
     log("全部通过")
-    app.quit()
+    # ★ 不用 app.quit()：它触发的窗口 close 会被 QML onClosing（收进托盘模式）
+    #   拦下来，事件循环退不出去 → 明明跑完了却挂住。判定已打印完，直接退。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 QTimer.singleShot(300, run)
-QTimer.singleShot(90000, app.quit)
+QTimer.singleShot(90000, lambda: os._exit(1))
 app.exec()

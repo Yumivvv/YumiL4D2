@@ -84,6 +84,72 @@ def ensure_dirs() -> None:
         os.makedirs(d, exist_ok=True)
 
 
+# ---------------------------------------------------------------- 封面缓存上限
+# 视频封面是**按 bvid 落盘**的（`covers/<bvid>.jpg`），用得越久攒得越多。
+# 实测一台常用机器上 `data/cache/covers` 已经 320 MB / 2600 张 —— 而且只增不减。
+# 这里给一个软上限：超过就按「最后访问时间」从旧到新删到目标线以下。
+#
+# 为什么用 atime 而不是 mtime：mtime 是「下载到本地的时间」，全都差不多；
+# 而 Windows 默认会更新 atime，能反映「这张封面最近被看过没有」。
+# 拿不到 atime（有的文件系统会关掉）就退回 mtime，不会出错。
+COVER_CACHE_SOFT_LIMIT = 300 * 1024 * 1024     # 300 MB
+COVER_CACHE_TARGET = 220 * 1024 * 1024         # 删到 220 MB 就停
+
+
+def cover_cache_bytes() -> int:
+    """封面缓存当前占多少字节。"""
+    total = 0
+    try:
+        for name in os.listdir(COVER_DIR):
+            try:
+                total += os.path.getsize(os.path.join(COVER_DIR, name))
+            except OSError:
+                pass
+    except OSError:
+        return 0
+    return total
+
+
+def trim_cover_cache(limit: int = COVER_CACHE_SOFT_LIMIT,
+                     target: int = COVER_CACHE_TARGET) -> int:
+    """封面缓存超过 ``limit`` 就删到 ``target`` 以下，返回释放的字节数。
+
+    ★ 只在「启动后空闲时」调，不要在下载封面的过程中调 —— 那会把刚下好的
+      封面又删掉。调用方见 core 的 `_trim_cover_cache_async`。
+    """
+    total = cover_cache_bytes()
+    if total <= limit:
+        return 0
+
+    entries = []
+    try:
+        for name in os.listdir(COVER_DIR):
+            p = os.path.join(COVER_DIR, name)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if not os.path.isfile(p):
+                continue
+            # atime 优先，取不到（为 0）就用 mtime
+            when = st.st_atime or st.st_mtime
+            entries.append((when, st.st_size, p))
+    except OSError:
+        return 0
+
+    entries.sort(key=lambda x: x[0])          # 最久没看过的先删
+    freed = 0
+    for _when, size, path in entries:
+        if total - freed <= target:
+            break
+        try:
+            os.remove(path)
+            freed += size
+        except OSError:
+            continue
+    return freed
+
+
 # 首次运行时要从旧布局搬过来的小文件（缓存类不搬，体积大且能重建）
 _LEGACY_FILES = ("config.json", "library.json", "library.bak.json",
                  "modimports.json", "favorites.json", "authors.json", "modmeta.json")

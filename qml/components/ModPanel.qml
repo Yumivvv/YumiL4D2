@@ -1331,10 +1331,21 @@ Item {
                         clip: true
                         contentHeight: descEdit.contentHeight
                         boundsBehavior: Flickable.StopAtBounds
+                        // ★ 给右侧滚动条留出位置（见下面 TextEdit 的宽度）。
+                        //   以前文字吃满整个宽度，滚动条是**浮在上面**的，
+                        //   于是最右边那几个字被压在滚动条底下看不全
+                        //   —— 用户报的「简介和滑动框重叠」就是这个。
+                        readonly property int barW: 10
+                        readonly property int barGap: 6
 
                         TextEdit {
                             id: descEdit
+                            // 宽度扣掉滚动条 + 间隙。只在**真的有**滚动条时扣，
+                            // 内容短的时候右边不留空白。
+                            readonly property bool needBar:
+                                contentHeight > descFlick.height + 1
                             width: descFlick.width
+                                   - (needBar ? descFlick.barW + descFlick.barGap : 0)
                             readOnly: true
                             selectByMouse: true
                             persistentSelection: true
@@ -1353,8 +1364,12 @@ Item {
                             font.pixelSize: 11
                         }
                         ScrollBar.vertical: ScrollBar {
-                            width: 10
-                            policy: descEdit.contentHeight > descFlick.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                            id: descBar
+                            width: descFlick.barW
+                            policy: descEdit.needBar ? ScrollBar.AsNeeded
+                                                     : ScrollBar.AlwaysOff
+                            // 贴右边缘，并且**不**盖在文字上（文字已经让位）
+                            anchors.right: parent.right
                             contentItem: Rectangle {
                                 implicitWidth: 7
                                 radius: 3.5

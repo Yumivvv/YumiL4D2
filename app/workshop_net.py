@@ -970,11 +970,17 @@ def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
         hit = _LIST_CACHE.get(key)
     if hit and time.time() - hit[0] <= LIST_TTL:
         res = hit[1]
+        # ★ hasMore 也必须一起返回。以前缓存里只存 ok/items/total/page/error，
+        #   命中缓存时 hasMore 就变成 None，上层只能退化成「数本页条数」——
+        #   一旦某页恰好不满 30 条（网页版最后一页经常是 28/29 条），
+        #   就会误判「到底了」，表现为「列表只加载一页就没了」。
         return {"ok": res.get("ok", False),
                 "items": [dict(x) for x in res.get("items", [])],
                 "total": int(res.get("total") or 0),
                 "page": int(res.get("page") or 1),
-                "error": str(res.get("error") or ""), "cached": True}
+                "error": str(res.get("error") or ""),
+                "hasMore": bool(res.get("hasMore", False)),
+                "cached": True}
 
     res = _fetch_workshop_list_net(query, page, sort, list(tag_key), kind, timeout)
     if res.get("ok"):
@@ -983,6 +989,8 @@ def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
                 "ok": True, "items": res.get("items") or [],
                 "total": res.get("total") or 0, "page": res.get("page") or 1,
                 "error": "",
+                # 缓存也要存这个，否则第二次进同一页就丢「还有下一页」的信号
+                "hasMore": bool(res.get("hasMore", False)),
             })
             if len(_LIST_CACHE) > 120:
                 for old in sorted(_LIST_CACHE, key=lambda k: _LIST_CACHE[k][0])[:40]:
@@ -1037,13 +1045,27 @@ def _fetch_workshop_list_net(query: str = "", page: int = 1, sort: str = "trend"
     for tag in normalize_tags(tags):
         params.append(("requiredtags[]", tag))
 
-    try:
-        resp = NC.get(WORKSHOP_BROWSE_URL, params=params,
-                      headers={"User-Agent": UA},
-                      timeout=(5, max(8, int(timeout))))
-    except Exception as e:  # noqa: BLE001
+    # 连不上时重试一次（steamcommunity.com 在国内时不时抽风，重试往往就过了）。
+    # 两次都失败才报错，并且把「可能是网络」这层意思说清楚 ——
+    # 以前只写「ConnectTimeout」，用户以为是程序坏了。
+    last_err = ""
+    for attempt in range(2):
+        try:
+            resp = NC.get(WORKSHOP_BROWSE_URL, params=params,
+                          headers={"User-Agent": UA},
+                          timeout=(6, max(10, int(timeout))))
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = type(e).__name__
+            resp = None
+            if attempt == 0:
+                time.sleep(0.8)
+    if resp is None:
         return {"ok": False, "items": [], "total": 0, "page": page_n,
-                "error": f"连不上 Steam 工坊页面（{type(e).__name__}）"}
+                "error": (f"连不上 Steam 工坊页面（{last_err}）。"
+                          "如果浏览器也打不开 steamcommunity.com，"
+                          "说明当前网络访问不了它，挂个加速器再试"),
+                "needNetwork": True}
 
     status = int(getattr(resp, "status_code", 0) or 0)
     if status != 200:
