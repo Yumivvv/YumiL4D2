@@ -1420,7 +1420,14 @@ Item {
             // ★ 失败要和「真没搜到」分开说。以前两者共用一个空状态，
             //   拉取失败时只显示「什么都没搜到」，用户根本不知道是网络问题，
             //   自然也不会想到去点刷新。现在失败给原因 + 一个刷新按钮。
+            //
+            // ★ z 必须抬高：下面那个 GridView 是 `anchors.fill: parent`，
+            //   而且声明在后面（QML 里后声明的画在上层）。不抬 z 的话，
+            //   即使列表为空、肉眼看不见卡片，GridView 那块空白区域
+            //   依然会把这块「重新加载」的点击全部吃掉。
             Column {
+                objectName: "wsEmptyState"
+                z: 10
                 anchors.centerIn: parent
                 spacing: 8
                 visible: page.mgr && !page.mgr.browseLoading
@@ -1458,6 +1465,7 @@ Item {
                 }
                 // 失败时给一条能走的路：点它重来一次（有 15 秒预算）
                 Rectangle {
+                    objectName: "wsRetryBtn"
                     anchors.horizontalCenter: parent.horizontalCenter
                     visible: page.mgr && page.mgr.browseError.length > 0
                     height: 28
@@ -1669,7 +1677,11 @@ Item {
                 id: wsGrid
                 objectName: "wsGrid"
                 anchors.fill: parent
-                visible: !page.showLater
+                // ★ 列表为空时**必须让开**，否则它会把整块 gridWrap 铺满、
+                //   并且因为它声明在空状态之后，画在上层、先拿到鼠标 ——
+                //   空状态里那个「重新加载」按钮就被压在下面点不动
+                //   （用户报的「点击重新加载按钮没反应」就是这个）。
+                visible: !page.showLater && page.mgr && page.mgr.browseItems.length > 0
                 clip: true
                 cellWidth: Math.max(196, Math.floor((width - 6) / Math.max(1, Math.floor((width - 6) / 208))))
                 cellHeight: Math.round(cellWidth * 0.78)

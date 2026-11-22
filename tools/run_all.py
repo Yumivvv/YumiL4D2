@@ -59,6 +59,7 @@ DEFAULT_SUITE = [
     "ws_scroll_test",
     "ws_refresh_test",
     "ws_refresh_ui_test",
+    "ws_retry_click_test",
     "mod_delete_test",
     "mod_update_test",
     "workshop_dl_test",
