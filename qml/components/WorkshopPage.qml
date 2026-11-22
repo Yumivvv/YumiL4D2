@@ -195,6 +195,15 @@ Item {
         wsGrid.positionViewAtBeginning();
     }
 
+    // 顶栏「刷新」：清缓存 + 按当前筛选重拉第 1 页。
+    // 和 applyFilter 的区别是不改筛选条件、并且**绕过列表缓存**，
+    // 所以「网络刚恢复，想把刚才失败的那页重新拉一次」就点它。
+    function refreshList() {
+        if (!page.mgr) return;
+        page.showLater = false;
+        page.mgr.browseRefresh();
+    }
+
     function toggleTag(tag) {
         var out = [];
         var found = false;
@@ -1118,6 +1127,60 @@ Item {
                 }
             }
 
+            // 刷新：丢掉缓存、按当前筛选条件重新拉第 1 页。
+            //
+            // ★ 为什么非要有这个按钮：工坊列表只有网页一条路（官方 QueryFiles
+            //   要 API Key，那一栏已经彻底删了），steamcommunity.com 在国内
+            //   时不时整站不通。以前失败之后 Spinner 会一直转，用户既不知道
+            //   是卡住还是慢，也没有任何办法重试。现在：
+            //     · 每次请求后端只等 15 秒，到点就停转圈并报错；
+            //     · 失败后不会自己偷偷续拉，想再来就点这里。
+            Rectangle {
+                id: refreshBtn
+                objectName: "wsRefreshBtn"
+                width: 34
+                height: 30
+                radius: 15
+                anchors.right: sortRow.left
+                anchors.rightMargin: 6
+                anchors.verticalCenter: parent.verticalCenter
+                readonly property bool busy: page.mgr ? page.mgr.browseLoading : false
+                color: refreshMa.containsMouse
+                       ? Theme.scrim(0.1) : Theme.scrim(0.035)
+                border.width: 1
+                border.color: Theme.border
+
+                // 转圈用现有的 Spinner，和首屏那个一致，别再画一套
+                Spinner {
+                    anchors.centerIn: parent
+                    width: 15; height: 15
+                    visible: refreshBtn.busy
+                }
+
+                Text {
+                    anchors.centerIn: parent
+                    visible: !refreshBtn.busy
+                    text: "\uE72C"
+                    font.family: Theme.iconFont
+                    font.pixelSize: 12
+                    color: refreshMa.containsMouse ? Theme.accent : Theme.textDim
+                }
+
+                ToolTip.text: refreshBtn.busy ? "正在刷新…（最多 15 秒）"
+                                              : "刷新列表（清掉缓存重新拉）"
+                ToolTip.visible: refreshMa.containsMouse
+                ToolTip.delay: 500
+
+                MouseArea {
+                    id: refreshMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    enabled: !refreshBtn.busy
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: page.refreshList()
+                }
+            }
+
             // 排序胶囊
             Row {
                 id: sortRow
@@ -1353,6 +1416,10 @@ Item {
             }
 
             // 空状态
+            //
+            // ★ 失败要和「真没搜到」分开说。以前两者共用一个空状态，
+            //   拉取失败时只显示「什么都没搜到」，用户根本不知道是网络问题，
+            //   自然也不会想到去点刷新。现在失败给原因 + 一个刷新按钮。
             Column {
                 anchors.centerIn: parent
                 spacing: 8
@@ -1360,19 +1427,74 @@ Item {
                          && page.mgr.browseItems.length === 0 && !page.showLater
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    text: "\uE774"
+                    text: page.mgr && page.mgr.browseError.length > 0
+                          ? "\uE783" : "\uE774"
                     font.family: Theme.iconFont
                     font.pixelSize: 30
-                    color: Theme.textMute
+                    color: page.mgr && page.mgr.browseError.length > 0
+                           ? Theme.warn : Theme.textMute
                 }
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
+                    width: Math.min(420, gridWrap.width - 40)
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    visible: page.mgr && page.mgr.browseError.length > 0
+                    text: "列表没拉下来：" + (page.mgr ? page.mgr.browseError : "")
+                    color: Theme.warn
+                    font.family: Theme.uiFont
+                    font.pixelSize: 11
+                    lineHeight: 1.4
+                }
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    visible: !(page.mgr && page.mgr.browseError.length > 0)
                     text: page.activeTags.length > 0
                           ? "这个分类下没搜到，换个标签或清空试试"
                           : "什么都没搜到，换个关键词试试"
                     color: Theme.textMute
                     font.family: Theme.uiFont
                     font.pixelSize: 12
+                }
+                // 失败时给一条能走的路：点它重来一次（有 15 秒预算）
+                Rectangle {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    visible: page.mgr && page.mgr.browseError.length > 0
+                    height: 28
+                    width: retryTxt.implicitWidth + 34
+                    radius: 14
+                    color: retryMa.containsMouse
+                           ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.2)
+                           : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.12)
+                    border.width: 1
+                    border.color: Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                          Theme.accent.b, 0.45)
+                    Row {
+                        anchors.centerIn: parent
+                        spacing: 5
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "\uE72C"
+                            font.family: Theme.iconFont
+                            font.pixelSize: 10
+                            color: Theme.accent
+                        }
+                        Text {
+                            id: retryTxt
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "重新加载"
+                            color: Theme.accent
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                        }
+                    }
+                    MouseArea {
+                        id: retryMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: page.refreshList()
+                    }
                 }
             }
 
@@ -1622,9 +1744,13 @@ Item {
                         font.family: Theme.uiFont
                         font.pixelSize: 10
                     }
+                    // 底部错误只负责「已经有内容、追加下一页失败」这种情况。
+                    // 首屏失败时列表是空的，那条错误由中间的失败态统一显示 ——
+                    // 否则同一句话会在页面上下各出现一次。
                     Text {
                         anchors.centerIn: parent
                         visible: page.mgr && page.mgr.browseError.length > 0
+                                 && page.mgr.browseItems.length > 0
                         text: "加载失败：" + (page.mgr ? page.mgr.browseError : "")
                         color: Theme.warn
                         font.family: Theme.uiFont

@@ -57,6 +57,8 @@ DEFAULT_SUITE = [
     "filter_ui_test",
     "workshop_page_test",
     "ws_scroll_test",
+    "ws_refresh_test",
+    "ws_refresh_ui_test",
     "mod_delete_test",
     "mod_update_test",
     "workshop_dl_test",

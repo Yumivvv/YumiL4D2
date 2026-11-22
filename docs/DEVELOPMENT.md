@@ -594,7 +594,13 @@ GridView 的 `model` 一换（追加时把整个数组换掉），滚动位置�
 
 当初选 `QueryFiles` 是因为当时判断「工坊网页国内直连被重置（`WinError 10054`）」。
 **这个判断后来被实测推翻了**——浏览页现在能稳定抓下来（一次 575 KB / 200），
-所以整条链路改成解析网页，API Key 那一栏也从设置里删掉了。
+所以整条链路改成解析网页。
+
+后来还走过一段弯路：为了对付「网页偶尔整站不通」，把 `QueryFiles` 加回来当
+**回退**，并且在设置里放了一栏「可选填 Steam API Key」。这条路在 2026-11 被
+**彻底删除**（用户要求「完全去除掉」）—— 一个只想刷 MOD 的人不该先被要求去
+申请开发者密钥。现在的对策是「15 秒 + 点刷新重试」，详见
+[后面那一节](#为什么工坊还是没加速到真凶不是-cdn)。
 
 抓网页要摸清的四件事（都是实测踩出来的）：
 
@@ -718,23 +724,46 @@ GPL-3.0，即 Watt Toolkit）的加速是**本地反向代理 + 本地 CA 做 MI
 也就是说：**工坊列表那个域名根本连不上，而加速只优化 CDN 的 IP 选择，
 两者根本不在一个环节上**。加速再准也救不了它。
 
-##### 修法：网页不通时回退到官方 QueryFiles
+##### 修法（最终版）：点刷新重试，15 秒没回声就停
 
-`_fetch_workshop_list_net()` 在网页抓两次都失败后，会调用
-`_query_files_fallback()` 改走 `IPublishedFileService/QueryFiles`
-（`api.steampowered.com`，这个域名实测一直通）。
+中途试过一条「网页不通就回退 `IPublishedFileService/QueryFiles`」的路，
+**后来又整条删掉了** —— 它强制要 Steam Web API Key，等于让只想刷个 MOD 的人
+先去注册开发者账号、再手打一串 32 位密钥。用户明确要求「去除 STEAM API KEY 的
+设置选项，完全去除掉」，于是 key、回退函数、`workers` 一路传参全部连带删除。
 
-代价是它**必须带 Steam Web API Key**，所以：
+现在这条链路只剩一条：
 
-- 正常情况仍**优先抓网页**（不需要 key，普通用户零门槛）；
-- 只有网页连不上时才用 key 兜底 —— 设置 → 网络里的「Steam API Key」
-  因此是**可选项**，不是必需项；
-- 没填 key 时如实报错，并在错误里提示「配一个 key 可以让列表改走官方接口」，
-  不假装成功。
+| 环节 | 做法 |
+| --- | --- |
+| 列表 / 搜索 / 排序 / 翻页 / 筛选 | `steamcommunity.com/workshop/browse/`（不需要 key） |
+| 拉不到时 | 顶栏「刷新」按钮重试，**一次请求 15 秒预算**，到点就停 |
+| 失败之后 | 不自动续拉，也不会自己偷偷重试；只能用户点刷新 |
 
-> 这一栏曾经被删掉过（当时以为网页版永远够用），现在加回来并说明它是
-> 「救急开关」。`tools/accel_test.py` 第 6、7 节专门盯这条链路：
-> 无 key 时必须返回 None、`api_key` 要能从 `modmanager` 一路传到回退函数。
+为什么「15 秒 + 手动刷新」比「无限转圈」好，这是修 bug 修出来的结论：
+
+1. **失败时 `_browse_loading` 没被清掉。** `_browse_apply()` 的失败分支只设了
+   `_browse_error`、只清了追加用的 `_browse_more`，`_browse_loading` 只在
+   **成功分支**末尾清零。于是第一页一失败，`browseLoading` 就永远为 `True`：
+   首屏那个 Spinner 一直转，连「加载失败」的空状态都不显示（它的条件是
+   `!browseLoading`）。用户看到的就是「图标转个没完，列表永远出不来」。
+2. **没有任何时间上限。** 网页抓取内部重试 2 次、每次 `timeout=(6, ≥10)`，
+   最坏能拖到 30 秒以上，用户分不清「在转」还是「死了」。
+3. **没有手动重试的入口。** 唯一能重来的办法是切分类或改搜索词。
+
+对应实现：
+
+| 位置 | 做什么 |
+| --- | --- |
+| `ModManager.BROWSE_TIMEOUT_SEC` | `15.0`，一次列表请求的硬预算 |
+| `_browse_start_watchdog()` / `_browse_timeout()` | 单次 `QTimer`；到点把 `_browse_seq` 加一，让还在路上的线程回来时被当成过期结果丢掉（Python 杀不掉线程，只能这样作废） |
+| `_browse_apply()` 失败分支 | 同时清 `_browse_loading` 和 `_browse_more`，首屏失败再置 `_browse_done` |
+| `browseRefresh()` | 先 `WN.clear_list_cache()`（不然刷新永远命中 10 分钟缓存，看起来像没反应），再按当前筛选重拉第 1 页 |
+| `WorkshopPage.qml` 的 `wsRefreshBtn` | 顶栏排序胶囊左侧；`browseLoading` 时自己显示 Spinner 并禁用 |
+| 空状态 | 失败和「没搜到」分开：失败显示原因 + 「重新加载」按钮 |
+
+> 回归：`tools/accel_test.py`（第 6~8 节盯「key 确实删干净了」和刷新/超时接线）、
+> `tools/ws_refresh_test.py`（状态机：失败停转、超时收尾、迟到结果丢弃、刷新绕过缓存）、
+> `tools/ws_refresh_ui_test.py`（真窗口里点刷新）。
 
 ##### 顺带看清了 SteamTools 的四种模式
 

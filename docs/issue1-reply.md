@@ -113,7 +113,9 @@ CDN 路径，量总耗时选最低，不测吞吐。
   只剩官方 `ISteamRemoteStorage/GetPublishedFileDetails` 与 `GetCollectionDetails`；
 - `mods.py`：`WORKSHOP_RELAY_DETAIL` 已删；
 - `workshop_net.py`：`CDN_POOL_URL` / `WORKSHOP_LIST_BASE` 已删，
-  工坊列表改走官方 `IPublishedFileService/QueryFiles`（要用户自己的 key）；
+  工坊列表改抓 **Steam 自家工坊网页** `steamcommunity.com/workshop/browse/`（不需要任何 key）；
+  中间曾短暂改走官方 `IPublishedFileService/QueryFiles` 当回退，但那个接口要
+  Steam Web API Key，现已连同设置里的 key 输入栏一起**彻底删除**；
 - `servers.py`：`MAP_API` 已删，地图中文名改纯内置表。
 
 全仓库现在搜 `laoyutang` 只剩注释里的历史说明，没有任何可执行调用路径。
@@ -137,7 +139,7 @@ CDN 路径，量总耗时选最低，不测吞吐。
 
 | 接口 | 现状 |
 | --- | --- |
-| `GET l4d2-workshop.laoyutang.cn/list` | **已移除**，改官方 `QueryFiles`（用户自己的 key） |
+| `GET l4d2-workshop.laoyutang.cn/list` | **已移除**，改抓 Steam 官方工坊网页（不需要 key） |
 | `GET l4d2-workshop.laoyutang.cn/detail?id=…` | **已移除**，改官方 `GetPublishedFileDetails` |
 | `POST l4d2-workshop-parse.laoyutang.cn/` | **已移除**，改官方批量 `GetPublishedFileDetails` |
 | `GET lytvpk-get-ips.laoyutang.cn/` | **已移除**，只用内置 6 个 IP 表 |

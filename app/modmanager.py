@@ -39,6 +39,7 @@ from PySide6.QtCore import (
     QObject,
     Property,
     Qt,
+    QTimer,
     QUrl,
     Signal,
     Slot,
@@ -3628,15 +3629,26 @@ class ModManager(QObject):
         if seq != self._browse_seq:
             return
         if not res.get("ok"):
+            # ★★ 失败也必须把 loading 标志清掉 —— 这就是「一直转圈」的老根因。
+            #
+            #   以前这里只设了 error、只清了 `_browse_more`（追加分支），
+            #   `_browse_loading` 只在成功分支的末尾被清零。于是第一页一失败，
+            #   `browseLoading` 就永远为 True：首屏那个 Spinner 一直转，
+            #   连「加载失败」的空状态都不显示（它要求 !browseLoading），
+            #   用户看到的就是「图标转个没完，列表永远出不来」。
+            self._browse_loading = False
+            self._browse_more = False
             if append:
                 # 追加失败：保留已有内容，只在底部提示
-                self._browse_more = False
                 self._browse_error = res.get("error") or "加载更多失败"
             else:
                 self._browse_items = []
                 self._browse_thumbs = []
                 self._browse_total = 0
                 self._browse_error = res.get("error") or "拉取失败"
+                # 首屏失败就不要再让滚动自动续拉了（真到底了也不该再要），
+                # 想重来只能点顶栏的「刷新」—— 这是用户明确要的行为。
+                self._browse_done = True
                 self._set_status("拉取失败：" + self._browse_error)
             self.browseChanged.emit()
             return
@@ -3684,10 +3696,77 @@ class ModManager(QObject):
         )
         self._browse_more = False
         self._browse_loading = False
+        # ★ 不在这里 stop 计时器：这个方法是在**工作线程**里被调的，
+        #   而 QTimer 只能在它所属的线程（主线程）操作。
+        #   计时器到点时 `_browse_timeout` 会先看标志位，发现已经收工就直接返回，
+        #   所以让它自己烧完那 15 秒反而最安全。
         kind_label = "合集" if self._browse_kind == "collection" else "单件"
         self._set_status(f"工坊 · {kind_label} · 已加载 {loaded} 个")
         if append:
             self.browseAppended.emit()
+        self.browseChanged.emit()
+
+    # 一次工坊列表请求最多等多久（秒）。
+    #
+    # ★ 为什么要有这个上限：`fetch_workshop_list` 内部对网页抓取重试 2 次，
+    #   每次 `timeout=(6, max(10, timeout))`，最坏能拖到 30 秒以上。表现就是
+    #   用户说的「一直转圈图标加载不出来」。这里给整次请求一个硬预算：
+    #   时间到就把这次请求判失败、停转圈、提示点「刷新」重试，**不再无限等**。
+    BROWSE_TIMEOUT_SEC = 15.0
+
+    def _browse_stop_watchdog(self) -> None:
+        """停掉这一次的 15 秒计时（成功 / 失败 / 被新请求顶掉时都要停）。"""
+        guard = getattr(self, "_browse_guard", None)
+        if guard is not None and guard.isActive():
+            guard.stop()
+
+    def _browse_start_watchdog(self, seq: int, append: bool = False) -> None:
+        """给这次请求挂上 15 秒上限；到点还没回来就按失败收尾。
+
+        注意这里**杀不掉**正在跑的工作线程（Python 没这能力），
+        所以靠「把 `_browse_seq` 加一」让迟到的结果在 `_browse_apply`
+        里被判成过期请求丢掉 —— 线程自己跑完就算了，界面不受影响。
+        """
+        guard = getattr(self, "_browse_guard", None)
+        if guard is None:
+            guard = QTimer(self)
+            guard.setSingleShot(True)
+            self._browse_guard = guard
+            # `timeout` 只在第一次连一次：每次 start 前 disconnect 会在
+            # 「还没连过」时抛 libpyside 的 RuntimeWarning，日志里很吵。
+            guard.timeout.connect(self._browse_on_timeout)
+        self._browse_stop_watchdog()
+        self._browse_guard_seq = seq
+        self._browse_guard_append = bool(append)
+        guard.setInterval(int(self.BROWSE_TIMEOUT_SEC * 1000))
+        guard.start()
+
+    def _browse_on_timeout(self) -> None:
+        """计时器到点（实际判定逻辑在 `_browse_timeout`）。"""
+        self._browse_timeout(getattr(self, "_browse_guard_seq", -1))
+
+    def _browse_timeout(self, seq: int) -> None:
+        """15 秒到点还没结果：判这次刷新失败，退回可重试的状态。"""
+        if seq != self._browse_seq:
+            return          # 已经是别的请求了，这次超时无关
+        if not (self._browse_loading or self._browse_more):
+            return          # 已经有结果了（正常路径先把标志清了）
+        was_append = bool(getattr(self, "_browse_guard_append", False))
+        # 让还在路上的那个线程回来时被当成过期结果丢掉
+        self._browse_seq += 1
+        self._browse_loading = False
+        self._browse_more = False
+        if was_append:
+            # 追加超时：列表还在，只是这一页没拿到。**不置 done** ——
+            # 用户继续往下滚还可以再试一次（每次仍然只有 15 秒预算）。
+            self._browse_error = (f"加载更多超时（{self.BROWSE_TIMEOUT_SEC:g} 秒），"
+                                  "往下滚或点「刷新」再试")
+        else:
+            # 首屏超时：明确停下，不自动续拉，只留「刷新」这一条路。
+            self._browse_done = True
+            self._browse_error = (f"刷新超时（{self.BROWSE_TIMEOUT_SEC:g} 秒没有响应），"
+                                  "点右上角「刷新」再试")
+        self._set_status(self._browse_error)
         self.browseChanged.emit()
 
     def _browse_fetch(self, append: bool) -> None:
@@ -3700,11 +3779,12 @@ class ModManager(QObject):
 
         def worker() -> None:
             try:
-                # 列表优先抓工坊网页（**不需要 API Key**）；
-                # 网页连不上时，`fetch_workshop_list` 会用这里传的 key
-                # 回退到官方 QueryFiles —— 所以 key 要一起传下去。
-                res = WN.fetch_workshop_list(q, p, s, tags=tags, kind=k,
-                                             api_key=self._steam_api_key())
+                # ★ 只走 Steam 工坊网页，**不需要 API Key**
+                #   （官方 QueryFiles 回退已随「彻底移除 API Key」一起去掉）。
+                #   超时按 15 秒预算给：比它更长的等待对用户没有意义。
+                res = WN.fetch_workshop_list(
+                    q, p, s, tags=tags, kind=k,
+                    timeout=self.BROWSE_TIMEOUT_SEC)
             except Exception as e:  # noqa: BLE001
                 res = {"ok": False, "items": [], "total": 0,
                        "error": f"拉取列表出错：{e}"}
@@ -3713,21 +3793,8 @@ class ModManager(QObject):
             except RuntimeError:
                 pass
 
+        self._browse_start_watchdog(seq, append=append)
         threading.Thread(target=worker, daemon=True).start()
-
-    def _steam_api_key(self) -> str:
-        """用户自己填的 Steam Web API Key（空串 = 没填）。
-
-        ★ 用途变了但没废弃：
-          工坊列表**正常情况仍抓网页**，不需要 key；
-          只有 `steamcommunity.com` 整站连不上时，才用这个 key
-          回退到官方 `QueryFiles`（见 `_query_files_fallback`）。
-          所以它是「可选的救急开关」，不是必需项。
-        """
-        try:
-            return str(self._cfg["steam_api_key"] or "").strip()
-        except (KeyError, TypeError):
-            return ""
 
     @Slot(str, str, str, "QVariantList")
     def browseFilter(self, query: str = "", sort: str = "trend",
@@ -3749,6 +3816,28 @@ class ModManager(QObject):
         self.browseChanged.emit()
         self._set_status("正在拉取创意工坊列表…")
         self._browse_fetch(append=False)
+
+    @Slot(result="QVariantMap")
+    def browseRefresh(self) -> dict:
+        """顶栏「刷新」：丢掉缓存、按当前筛选条件重新拉第 1 页。
+
+        ★ 和 `browseFilter` 的区别只有一个 —— **先清列表缓存**。
+          `fetch_workshop_list` 有 10 分钟内存缓存，不丢的话「刷新」永远
+          返回同一份旧数据，用户会觉得按钮没反应。既然用户主动点了刷新，
+          那就是想要现在这一刻的真实数据。
+
+        ★ 顺带把上一次失败的痕迹全部清掉（`_browse_done` / `_browse_error`），
+          这样「刷新才加载」才成立：失败后不会自己偷偷续拉，
+          但只要点刷新就重新开始一轮，仍然有 15 秒预算。
+        """
+        try:
+            WN.clear_list_cache()
+        except Exception as e:  # noqa: BLE001  清缓存失败不该挡住刷新
+            log(f"workshop list cache clear failed: {e!r}")
+        self._browse_done = False
+        self.browseFilter(self.browseQuery, self.browseSort, self.browseKind,
+                          self.browseTags)
+        return {"ok": True, "page": self.browsePage}
 
     @Slot(str, int, str)
     def browseWorkshop(self, query: str = "", page: int = 1, sort: str = "trend") -> None:

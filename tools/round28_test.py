@@ -73,10 +73,10 @@ def main():
     check("缓存写入时存了 hasMore", '"hasMore": bool(res.get("hasMore", False))' in wsrc)
     check("缓存读取时返回 hasMore", '"hasMore": bool(res.get("hasMore", False))' in wsrc)
     check("连不上时重试 2 次", "for attempt in range(2)" in wsrc)
-    # 提示要「可操作」：现在给的是「配一个 Steam API Key 可以走官方接口」，
-    # 比原来那句「挂个加速器」更具体（而且真的能自救）。
+    # 提示要「可操作」。2026-11 起不再是「配一个 API Key」（那栏已彻底删除），
+    # 而是让用户点顶栏的刷新重试 —— 所以这里认「刷新」这个词。
     check("网络失败提示可操作",
-          "API Key" in wsrc or "挂个加速器" in wsrc)
+          "刷新" in wsrc or "挂个加速器" in wsrc or "API Key" in wsrc)
 
     # ---------------------------------------------------------- 4. 关于界面
     print("=== 4. 关于界面重排 ===")

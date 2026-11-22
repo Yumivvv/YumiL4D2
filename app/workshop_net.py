@@ -1005,12 +1005,10 @@ def _translate_chunk_transmart(chunk: str, target: str, timeout: float,
 WORKSHOP_BROWSE_URL = (
     "https://steamcommunity.com/workshop/browse/")
 
-# 回退用的官方 JSON 列表接口（**需要 Steam Web API Key**）。
-# 只在网页版连不上时启用，见 `_query_files_fallback`。
-WORKSHOP_QUERY_API = (
-    "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/")
-# QueryFiles 的排序枚举：0 = 热度 / 1 = 最新 / 3 = 最高评分
-_STEAM_QUERY_SORT = {"trend": 0, "recent": 1, "top": 3}
+# ★ 2026-11：原先「网页抓不到就回退官方 QueryFiles」这条路**整条删掉**了。
+#   QueryFiles 强制要 Steam Web API Key，而设置里那一栏已经按用户要求彻底移除。
+#   现在网页抓不到就照实报错，让用户点顶栏的「刷新」重试（15 秒内没回来就停，
+#   不再无限转圈）。少一条要用户去注册 key 的链路，也少一个 fork 出来的状态。
 
 # 排序：trend=热门 / recent=最新 / top=评分最高
 SORT_MODES = ("trend", "recent", "top")
@@ -1079,15 +1077,15 @@ def normalize_tags(value: object) -> list[str]:
 
 def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
                         tags: object = None, kind: str = "mod",
-                        timeout: float = 25.0, api_key: str = "") -> dict:
+                        timeout: float = 25.0) -> dict:
     """拉一页工坊列表（L4D2，appid=550），带 10 分钟内存缓存。
 
     缓存的意义：切分类、点「稍后看」再点回来、来回滚列表时不该再等一次网络。
     返回 {"ok", "items": [...], "total", "page", "error", "cached"}。
     items 每项：{id, title, preview, author, fileType, views, subs, tags, children}
 
-    ★ **不需要 API Key**（走 Steam 工坊网页）。`api_key` 参数只为兼容旧调用保留，
-      传了也不用。列表只给 ID / 封面 / 标题，其余字段由调用方按 ID 批量补齐。
+    ★ **不需要 API Key**（走 Steam 工坊网页），也没有备用接口了。
+      列表只给 ID / 封面 / 标题，其余字段由调用方按 ID 批量补齐。
     """
     tag_key = tuple(normalize_tags(tags))
     key = (str(query or "").strip(), normalize_page(page),
@@ -1109,7 +1107,7 @@ def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
                 "cached": True}
 
     res = _fetch_workshop_list_net(query, page, sort, list(tag_key), kind,
-                                   timeout, api_key)
+                                   timeout)
     if res.get("ok"):
         with _LIST_LOCK:
             _LIST_CACHE[key] = (time.time(), {
@@ -1127,83 +1125,6 @@ def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
     return res
 
 
-def _query_files_fallback(page: int, sort: str, query: str, tags: object,
-                          kind: str, timeout: float,
-                          api_key: str) -> dict | None:
-    """网页版抓不到时的回退：走官方 `IPublishedFileService/QueryFiles`。
-
-    返回 None 表示「这条回退用不了」（没配 key / 接口也不通），
-    调用方据此走原来的报错分支。
-
-    ★ 为什么用这个当回退而不是主路径：
-      它**强制要求 Steam Web API Key**，对普通用户是额外门槛。
-      所以正常情况仍优先抓网页（不需要 key），只在网页不通时才用它救急。
-      而 `api.steampowered.com` 在国内的连通性明显好过 `steamcommunity.com`
-      （实测前者 123ms 正常、后者整站超时），所以这条回退真的能救命。
-    """
-    key = str(api_key or "").strip()
-    if not key:
-        return None
-
-    tag_list = normalize_tags(tags)
-    params = {
-        "key": key,
-        "query_type": _STEAM_QUERY_SORT.get(normalize_sort(sort), 0),
-        "page": normalize_page(page) - 1,      # QueryFiles 的页码从 0 开始
-        "numperpage": 30,
-        "creator_appid": 550,
-        "appid": 550,
-        "filetype": 0 if normalize_kind(kind) == "mod" else 1,
-        "return_previews": "true",
-        "return_short_description": "true",
-        "return_metadata": "true",
-    }
-    if query:
-        params["search_text"] = query
-    if tag_list:
-        params["requiredtags"] = ",".join(tag_list)
-
-    try:
-        resp = NC.get(WORKSHOP_QUERY_API, params=params,
-                      headers={"User-Agent": UA},
-                      timeout=(6, max(10, int(timeout))))
-        if int(getattr(resp, "status_code", 0) or 0) != 200:
-            return None
-        js = resp.json()
-    except Exception as e:  # noqa: BLE001
-        log(f"QueryFiles fallback failed: {e!r}")
-        return None
-
-    body = js.get("response") or {}
-    raw = body.get("publishedfiledetails") or []
-    items: list[dict] = []
-    for it in raw:
-        wid = str(it.get("publishedfileid") or "")
-        if not wid:
-            continue
-        tags_out = [str(t.get("tag") or "").strip()
-                    for t in (it.get("tags") or []) if isinstance(t, dict)]
-        items.append({
-            "id": wid,
-            "title": (it.get("title") or "").strip(),
-            "preview": it.get("preview_url") or "",
-            "author": str(it.get("creator") or ""),
-            "fileType": int(it.get("file_type") or 0),
-            "views": int(it.get("views") or 0),
-            "subs": int(it.get("subscriptions") or 0),
-            "favorited": int(it.get("favorited") or 0),
-            "children": int(it.get("num_children") or 0),
-            "created": int(it.get("time_created") or 0),
-            "updated": int(it.get("time_updated") or 0),
-            "tags": [t for t in tags_out if t],
-        })
-    return {"ok": True, "items": items,
-            "total": int(body.get("total") or 0),
-            "page": normalize_page(page), "error": "",
-            "hasMore": len(items) >= 30,
-            # 告诉界面「这次走了回退」，可以据此提示用户
-            "viaFallback": True}
-
 
 def clear_list_cache() -> None:
     """清空列表缓存（设置里改节点、或测试要拿实时数据时用）。"""
@@ -1213,8 +1134,7 @@ def clear_list_cache() -> None:
 
 def _fetch_workshop_list_net(query: str = "", page: int = 1, sort: str = "trend",
                              tags: object = None, kind: str = "mod",
-                             timeout: float = 25.0,
-                             api_key: str = "") -> dict:
+                             timeout: float = 25.0) -> dict:
     """真正去抓一次工坊浏览页（没有缓存）—— 走 Steam 官方网页，**不需要 API Key**。
 
     抓回来的只有 ID / 封面 / 标题（网页卡片里就这些）。体积、作者、订阅数、
@@ -1267,27 +1187,15 @@ def _fetch_workshop_list_net(query: str = "", page: int = 1, sort: str = "trend"
             if attempt == 0:
                 time.sleep(0.8)
 
-    # ★★ 网页版抓不到 → 回退到官方 `IPublishedFileService/QueryFiles`
-    #
-    #   为什么必须加这条：`steamcommunity.com` 在国内**经常整站不可达**
-    #   （实测系统 DNS 被污染到 157.240.2.50 这种 Facebook 段，换公共 DNS
-    #   解析出的 IP 也全部超时），而 `api.steampowered.com` 一直是通的。
-    #   以前没有回退，结果就是「加速开了、封面也快了，但工坊列表整个打不开」——
-    #   用户说的「创意工坊还是没加速到」就是它：阻塞点根本不在 CDN，
-    #   而在列表这个域名的连通性上。
-    #
-    #   代价：QueryFiles 需要 Steam Web API Key（`api_key` 由调用方传入）。
-    #   没有 key 时这条回退不了，就照实报错（不会假装成功）。
+    # ★ 两次都失败 → 照实报错，不再有「换个官方接口」那条备用路
+    #   （QueryFiles 要 API Key，那一栏已按要求彻底移除）。
+    #   界面那边会给这次请求 15 秒预算，超时就停转并提示点「刷新」重试。
     if resp is None:
-        fb = _query_files_fallback(page_n, sort_n, q, tags, kind_n,
-                                  timeout, api_key)
-        if fb is not None:
-            return fb
         return {"ok": False, "items": [], "total": 0, "page": page_n,
                 "error": (f"连不上 Steam 工坊页面（{last_err}）。"
                           "如果浏览器也打不开 steamcommunity.com，"
                           "说明当前网络访问不了它；"
-                          "配一个 Steam API Key 可以让列表改走官方接口"),
+                          "换个网络或开加速器后点右上角「刷新」重试"),
                 "needNetwork": True}
 
     status = int(getattr(resp, "status_code", 0) or 0)

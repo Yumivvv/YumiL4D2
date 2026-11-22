@@ -88,10 +88,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 工坊 DNS：和上面的「网络加速」是**两件独立的事**——
     "workshop_dns_mode": "dnspod",
     "workshop_dns_custom": "",
-    # ★ 已废弃：曾经存过用户的 Steam Web API Key（工坊列表要用）。
-    #   2026-11 起列表/搜索改走 Steam 工坊网页，不再需要 key。
-    #   字段留着只是为了兼容老配置文件（读进来不报错、也不再用它）。
-    "steam_api_key": "",
+    # ★ 2026-11：`steam_api_key` 已**彻底移除**（用户要求「去除 STEAM API KEY 的设置选项」）。
+    #   工坊列表只走 Steam 网页，不需要任何 key，也没有备用接口了。
+    #   老配置文件里若还留着这个键，`load()` 不会报错，只是再也没人读它；
+    #   这里不再写进 DEFAULT_CONFIG，新装的配置里就不会有这一项。
     # 创意工坊「稍后看」：只存工坊 ID 列表，详情按需再拉
     "workshop_later": [],
     # 收藏的服务器：只存地址和备注名，实时状态（人数/地图/模式）查询时再生

@@ -2533,57 +2533,18 @@ class Core(QObject):
 
     # ---------------------------------------------------------------- Steam API Key
     #
-    # ★ 这不是「必需品」，而是「救急开关」。
+    # ★ 2026-11 已**彻底移除**（用户要求「去除 STEAM API KEY 的设置选项，完全去除掉」）。
     #
-    #   工坊列表**正常情况仍然抓网页**（steamcommunity.com/workshop/browse/），
-    #   那个页面不需要 key。
+    #   曾经这里有一栏「可选填 key」：工坊列表正常抓网页（不需要 key），
+    #   只有 `steamcommunity.com` 整站不可达时才用它回退到官方
+    #   `IPublishedFileService/QueryFiles`（那个接口强制要 key）。
     #
-    #   但实测国内 `steamcommunity.com` 经常**整站不可达**
-    #   （系统 DNS 被污染到 Facebook 的 IP 段，换公共 DNS 解析出的 IP 也全部超时），
-    #   而 `api.steampowered.com` 一直通。这种情况下唯一的出路是回退到官方
-    #   `IPublishedFileService/QueryFiles` —— 它**必须带 key**。
+    #   现在整条备用链路连 `_query_files_fallback()` 一起删了：
+    #   少一条要用户去注册、还得手动粘贴 key 的路，也少一个半死不活的状态。
+    #   网页抓不到时的对策改成「点工坊顶栏的刷新重试」—— 每次请求 15 秒预算，
+    #   超时就停转圈并给出明确提示，不再无限转（那才是用户真正抱怨的点）。
     #
-    #   所以：填了 key 就多一条活路，不填只影响「网页挂了的时候」。
-    #   key 只存本地 config.json，不上传。
-    @Property(str, notify=statusChanged)
-    def steamApiKey(self) -> str:
-        """当前保存的 key（给输入框回显用）。"""
-        return str(self.config["steam_api_key"] or "")
-
-    @Property(bool, notify=statusChanged)
-    def hasSteamApiKey(self) -> bool:
-        return bool(str(self.config["steam_api_key"] or "").strip())
-
-    # 输入框里正在编辑、还没点「保存」的草稿（避免每敲一个字符就落盘）
-    _steam_key_draft = ""
-
-    @Slot(str)
-    def setSteamApiKeyDraft(self, text: str) -> None:
-        """记下输入框的草稿（不落盘，等用户点保存）。"""
-        self._steam_key_draft = str(text or "").strip()
-
-    @Slot()
-    def saveSteamApiKey(self) -> None:
-        """把草稿写进配置（点「保存」时调）。"""
-        key = str(getattr(self, "_steam_key_draft", "") or "").strip()
-        self.config["steam_api_key"] = key
-        self.config.save()
-        if key:
-            self._set_status("已保存 Steam API Key（工坊网页连不上时会用它兜底）")
-            self.toast("已保存 Steam API Key", "ok")
-        else:
-            self._set_status("API Key 是空的，没有保存")
-            self.toast("Key 是空的，没有保存", "warn")
-        self.statusChanged.emit()
-
-    @Slot()
-    def clearSteamApiKey(self) -> None:
-        self._steam_key_draft = ""
-        self.config["steam_api_key"] = ""
-        self.config.save()
-        self._set_status("已清空 Steam API Key")
-        self.toast("已清空 Steam API Key", "info")
-        self.statusChanged.emit()
+    #   config 里残留的 `steam_api_key` 不再被读取，老配置留着也不影响使用。
 
     @Slot("QVariantMap")
     def openPanLink(self, link: dict) -> None:

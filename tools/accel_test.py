@@ -115,46 +115,77 @@ def main():
     check("LICENSE 是 GPL v3", "GNU GENERAL PUBLIC LICENSE" in head
           and "Version 3" in head)
 
-    # ---------------------------------------------------------- 6. 网页不通的回退
-    print("=== 6. 工坊网页不通时回退到官方 QueryFiles ===")
-    # 实测：国内 steamcommunity.com 经常整站不可达（DNS 被污染 + 换公共 DNS
-    # 的 IP 也全超时），而 api.steampowered.com 一直通。所以列表必须有回退，
-    # 否则「加速开了、封面也快了，但工坊列表整个打不开」。
-    check("有回退函数", hasattr(WN, "_query_files_fallback"))
-    check("有 QueryFiles 地址", "IPublishedFileService/QueryFiles"
-          in getattr(WN, "WORKSHOP_QUERY_API", ""))
-    check("有排序映射", hasattr(WN, "_STEAM_QUERY_SORT"))
+    # ------------------------------------------------- 6. 只剩网页一条路
+    print("=== 6. 工坊列表：只走网页，不再有任何 API Key 依赖 ===")
+    # ★ 2026-11 的改动：用户要求「去除 STEAM API KEY 的设置选项，完全去除掉」。
+    #   于是 QueryFiles 那条回退（它强制要 key）连同 api_key 参数一起删了。
+    #   这里反过来盯：**必须删干净**，别再有人手滑加回来 ——
+    #   只要 key 还在，设置里就会再长出一栏，用户又得去注册。
+    check("回退函数已经删掉", not hasattr(WN, "_query_files_fallback"))
+    check("QueryFiles 地址常量已经删掉",
+          not hasattr(WN, "WORKSHOP_QUERY_API"))
+    check("QueryFiles 排序映射已经删掉",
+          not hasattr(WN, "_STEAM_QUERY_SORT"))
+    check("列表仍走官方工坊网页", "steamcommunity.com/workshop/browse" in src)
 
-    # 无 key 时回退不了，要返回 None（不能假装成功）
-    check("无 key -> None",
-          WN._query_files_fallback(1, "trend", "", None, "mod", 10, "") is None)
-    check("空白 key -> None",
-          WN._query_files_fallback(1, "trend", "", None, "mod", 10, "  ") is None)
-
-    # api_key 要能一路传到回退
+    # 签名里不该再有 api_key 这个「只为兼容而留」的摆设
     sig_f = inspect.signature(WN.fetch_workshop_list)
-    check("fetch_workshop_list 有 api_key", "api_key" in sig_f.parameters)
+    check("fetch_workshop_list 没有 api_key", "api_key" not in sig_f.parameters,
+          str(list(sig_f.parameters)))
     sig_n = inspect.signature(WN._fetch_workshop_list_net)
-    check("_fetch_workshop_list_net 有 api_key", "api_key" in sig_n.parameters)
+    check("_fetch_workshop_list_net 没有 api_key",
+          "api_key" not in sig_n.parameters, str(list(sig_n.parameters)))
     body = inspect.getsource(WN._fetch_workshop_list_net)
-    check("列表函数里调了回退", "_query_files_fallback" in body)
+    check("列表函数里不再调回退", "_query_files_fallback" not in body)
 
     mm = open(os.path.join(ROOT, "app", "modmanager.py"), encoding="utf-8").read()
-    check("modmanager 把配置里的 key 传下去",
-          "api_key=self._steam_api_key()" in mm)
-    check("_steam_api_key 真读配置", 'self._cfg["steam_api_key"]' in mm)
+    check("modmanager 不再读配置里的 key", 'self._cfg["steam_api_key"]' not in mm)
+    check("modmanager 没有 _steam_api_key", "def _steam_api_key(" not in mm)
+    check("modmanager 不再把 key 传下去",
+          "api_key=self._steam_api_key()" not in mm)
 
-    # ---------------------------------------------------------- 7. 设置页输入框
-    print("=== 7. 设置页有可选的 API Key 输入框 ===")
+    # config 默认值里也不该再有这一项（老配置残留无所谓，新装不能有）
+    st = open(os.path.join(ROOT, "app", "store.py"), encoding="utf-8").read()
+    check("DEFAULT_CONFIG 不再写 steam_api_key",
+          '"steam_api_key": ""' not in st)
+
+    # ------------------------------------------------- 7. 设置页已经没有输入框
+    print("=== 7. 设置页不再有 API Key 输入框 ===")
     mq = open(os.path.join(ROOT, "qml", "Main.qml"), encoding="utf-8").read()
     for tag in ("steamKeySection", "steamKeyInput", "steamKeySaveBtn",
                 "steamKeyClearBtn"):
-        check(f"有 {tag}", f'objectName: "{tag}"' in mq)
+        check(f"没有 {tag}", f'objectName: "{tag}"' not in mq)
+    check("设置里不再出现「Steam API Key」这个标题",
+          "Steam API Key" not in mq)
 
     cs = open(os.path.join(ROOT, "app", "core.py"), encoding="utf-8").read()
     for m in ("steamApiKey", "hasSteamApiKey", "saveSteamApiKey",
-              "clearSteamApiKey"):
-        check(f"core 有 {m}", f"def {m}(" in cs)
+              "clearSteamApiKey", "setSteamApiKeyDraft"):
+        check(f"core 没有 {m}", f"def {m}(" not in cs)
+
+    # ------------------------------------------- 8. 刷新按钮 + 15 秒上限
+    print("=== 8. 工坊刷新按钮 + 15 秒超时（不再无限转圈）===")
+    check("modmanager 有 browseRefresh", "@Slot(result=\"QVariantMap\")" in mm
+          and "def browseRefresh(" in mm)
+    check("刷新会先清列表缓存", "WN.clear_list_cache()" in mm)
+    check("有一次请求 15 秒的预算",
+          "BROWSE_TIMEOUT_SEC" in mm and "15.0" in mm)
+    check("有看门狗计时器（到点判失败）",
+          "_browse_start_watchdog" in mm and "_browse_timeout" in mm)
+    # ★ 这条是「一直转圈」的真正根因：失败分支以前不清 loading 标志
+    apply_body = mm.split("def _browse_apply(", 1)[-1]
+    fail_seg = apply_body.split('if not res.get("ok"):', 1)[-1][:900]
+    check("失败分支会清掉 browseLoading 标志",
+          "self._browse_loading = False" in fail_seg,
+          fail_seg.replace("\n", " ")[:120])
+
+    ws = open(os.path.join(ROOT, "qml", "components", "WorkshopPage.qml"),
+              encoding="utf-8").read()
+    check("顶栏有刷新按钮", 'objectName: "wsRefreshBtn"' in ws)
+    check("刷新按钮调 browseRefresh", "page.mgr.browseRefresh()" in ws)
+    check("失败时给出「重新加载」入口", "page.refreshList()" in ws)
+    check("失败原因和「没搜到」分开显示",
+          "browseError.length > 0" in ws)
 
     print()
     if FAILS:
