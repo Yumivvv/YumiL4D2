@@ -3287,7 +3287,8 @@ class ModManager(QObject):
                     if old is None or row["ms"] < old["ms"]:
                         best_of[key] = row
                 elif key not in best_of:
-                    best_of[key] = {"region": key, "ms": -1, "ok": False}
+                    best_of[key] = {"region": key, "ms": -1, "kbps": 0,
+                                    "ok": False}
             self._cdn_rows = sorted(
                 best_of.values(),
                 key=lambda r: (0 if r["ok"] else 1,
@@ -3699,8 +3700,11 @@ class ModManager(QObject):
 
         def worker() -> None:
             try:
-                # ★ 列表走 Steam 工坊网页，**不需要 API Key**。
-                res = WN.fetch_workshop_list(q, p, s, tags=tags, kind=k)
+                # 列表优先抓工坊网页（**不需要 API Key**）；
+                # 网页连不上时，`fetch_workshop_list` 会用这里传的 key
+                # 回退到官方 QueryFiles —— 所以 key 要一起传下去。
+                res = WN.fetch_workshop_list(q, p, s, tags=tags, kind=k,
+                                             api_key=self._steam_api_key())
             except Exception as e:  # noqa: BLE001
                 res = {"ok": False, "items": [], "total": 0,
                        "error": f"拉取列表出错：{e}"}
@@ -3712,11 +3716,18 @@ class ModManager(QObject):
         threading.Thread(target=worker, daemon=True).start()
 
     def _steam_api_key(self) -> str:
-        """★ 已废弃：工坊列表改走网页版，不再需要 API Key。
+        """用户自己填的 Steam Web API Key（空串 = 没填）。
 
-        保留这个方法只是为了不让老的外部调用直接崩，永远返回空串。
+        ★ 用途变了但没废弃：
+          工坊列表**正常情况仍抓网页**，不需要 key；
+          只有 `steamcommunity.com` 整站连不上时，才用这个 key
+          回退到官方 `QueryFiles`（见 `_query_files_fallback`）。
+          所以它是「可选的救急开关」，不是必需项。
         """
-        return ""
+        try:
+            return str(self._cfg["steam_api_key"] or "").strip()
+        except (KeyError, TypeError):
+            return ""
 
     @Slot(str, str, str, "QVariantList")
     def browseFilter(self, query: str = "", sort: str = "trend",

@@ -34,6 +34,35 @@ def check(name, ok, extra=""):
         fails.append(name)
 
 
+_SKIPS = []
+
+
+def skip(name, why=""):
+    """记一条「跳过」——不算失败，但也要打印出来，别让结果看起来像全过。"""
+    print(f"  skip  {name}" + (f"  {why}" if why else ""))
+    _SKIPS.append(name)
+
+
+def _steamcommunity_reachable(timeout: float = 6.0) -> bool:
+    """工坊域名通不通（只看 TCP 连得上，不关心内容）。
+
+    ★ 为什么不直接用「收到结果与否」判断：那样分不清「代码没发请求」
+      和「请求发了但网断了」，前者是 bug、后者是环境。
+    """
+    import socket
+    try:
+        with socket.create_connection(("steamcommunity.com", 443),
+                                      timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _skip_real_chain():
+    """离线时把「真实链路」那一节的断言语义降级成 skip（不影响退出码）。"""
+    skip("真实链路：请求序号 == 结果序号", "steamcommunity.com 不可达")
+
+
 QML_WS = open(os.path.join("qml", "components", "WorkshopPage.qml"),
               encoding="utf-8").read()
 PY_MM = open(os.path.join("app", "modmanager.py"), encoding="utf-8").read()
@@ -90,6 +119,22 @@ def _go():
 
 def _check():
     if not events:
+        # ★ 区分「代码坏了」和「根本没网」。
+        #
+        #   这一节验的是「请求序号 == 结果序号」，需要真去工坊拉一次详情。
+        #   而国内 `steamcommunity.com` 经常整站不可达（DNS 被污染到
+        #   108.160.165.139 这种段上，换公共 DNS 也超时）。
+        #   那种情况下**一条结果都收不到是正常的** —— 用户也明确说过
+        #   「因为网络没开加速导致加载不了的不用管」。
+        #   所以这里先探一下域名通不通：不通就 skip，通着却收不到才算 FAIL。
+        #   否则离线环境下回归永远是红的，真回归反而被淹掉。
+        if not _steamcommunity_reachable():
+            print("  [skip] steamcommunity.com 当前不可达（网络原因），"
+                  "跳过「真实链路」这一节", flush=True)
+            print("  [skip] 上面的序号机制断言已经覆盖了本用例的核心逻辑，"
+                  "联网环境下会再验一次端到端", flush=True)
+            _skip_real_chain()
+            return
         check("15 秒内收到解析结果", False, "一条都没收到 → 界面会一直转圈")
     else:
         r = events[-1]

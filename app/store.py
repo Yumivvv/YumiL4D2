@@ -241,6 +241,18 @@ class Config:
 class Library:
     """已见过的视频集合 + 是否已读状态."""
 
+    # ★ 这些是**派生值**，绝不能落盘。
+    #
+    #   网盘链接的 `expireDays`（还剩几天）是「查的那一刻」算出来的相对值。
+    #   一旦存进 library.json，第二天再打开读到的还是昨天的数字 ——
+    #   用户看到的就是「昨天 7 天后，今天还是 7 天后，实际只剩 6 天」。
+    #   `expired` / `expireText` 同理（都是基于当时的时间算的）。
+    #
+    #   真正该持久化的是 `expireAt`（绝对时间戳），它永远是对的；
+    #   打开时用它减去当前时间就能得到正确的天数（见 app/panshare.py 的
+    #   `_refresh`）。
+    _DERIVED_LINK_KEYS = ("expired", "expireText", "expireDays")
+
     def __init__(self) -> None:
         self.videos: dict[str, dict] = {}
         self.meta: dict[str, Any] = {"first_run": True, "last_check": 0, "total_checks": 0}
@@ -253,9 +265,32 @@ class Library:
             raw = _read_json(LIBRARY_BAK, {}) or {}
         self.videos = raw.get("videos") or {}
         self.meta.update(raw.get("meta") or {})
+        # 老文件里可能残留着过期的相对天数，读进来就丢掉（顺带纠正历史数据）
+        self._strip_derived()
+
+    def _strip_derived(self) -> None:
+        """把派生字段从内存里的 videos 清掉（也会纠正历史脏数据）。"""
+        for v in self.videos.values():
+            for lk in (v or {}).get("links") or []:
+                if not isinstance(lk, dict):
+                    continue
+                for k in self._DERIVED_LINK_KEYS:
+                    lk.pop(k, None)
 
     def save(self) -> None:
-        payload = {"meta": self.meta, "videos": self.videos}
+        # 落盘前剔除派生字段：不污染文件，也避免跨天读到旧值
+        clean_videos: dict[str, dict] = {}
+        for bvid, v in self.videos.items():
+            vv = dict(v or {})
+            if vv.get("links"):
+                vv["links"] = [
+                    ({k: val for k, val in lk.items()
+                      if k not in self._DERIVED_LINK_KEYS}
+                     if isinstance(lk, dict) else lk)
+                    for lk in vv["links"]
+                ]
+            clean_videos[bvid] = vv
+        payload = {"meta": self.meta, "videos": clean_videos}
         try:
             if os.path.exists(LIBRARY_PATH):
                 shutil.copyfile(LIBRARY_PATH, LIBRARY_BAK)

@@ -615,10 +615,15 @@ Item {
                                 //   没过期的链接虽然查到了到期日，却一个字都不显示 ——
                                 //   等于白查。现在快到期（≤30 天）就用橙色角标提醒，
                                 //   让人趁早存一份，而不是等到点开才发现失效。
+                                //
+                                // ★ 判断条件必须用 `expireAt > 0`（有确切到期日），
+                                //   **不能**用 `expireDays > 0`：`expireDays` 现在是
+                                //   「按日历日算还剩几天」，今天到期正好是 0，
+                                //   用它当开关会把「今天到期」这条藏起来。
                                 Rectangle {
                                     objectName: "linkExpiringTag"
                                     visible: !(modelData.expired === true)
-                                             && (modelData.expireDays || 0) > 0
+                                             && (modelData.expireAt || 0) > 0
                                              && (modelData.expireDays || 0) <= 30
                                     height: 16
                                     width: soonTxt.implicitWidth + 10
@@ -632,7 +637,8 @@ Item {
                                     Text {
                                         id: soonTxt
                                         anchors.centerIn: parent
-                                        text: (modelData.expireDays || 0) <= 1
+                                        // 0 = 今天到期（按日历日算），1 = 明天
+                                        text: (modelData.expireDays || 0) <= 0
                                               ? "今天到期"
                                               : ((modelData.expireDays || 0) + " 天后到期")
                                         color: Theme.warn

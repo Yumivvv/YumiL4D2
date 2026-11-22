@@ -2068,13 +2068,19 @@ class Core(QObject):
             expired = state in ("expired", "gone")
             text = str(res.get("text") or "")
             days = int(res.get("expireDays") or 0)
+            # ★ `expireAt` 是唯一该长期保存的字段（绝对时间戳）；
+            #   expired / expireText / expireDays 都是它的投影，
+            #   保存只为「本次运行内」显示，落盘时 store.Library 会剔除。
+            at = int(res.get("expireAt") or 0)
             if (bool(lk.get("expired")) != expired
                     or lk.get("expireText") != text
-                    or int(lk.get("expireDays") or 0) != days):
+                    or int(lk.get("expireDays") or 0) != days
+                    or int(lk.get("expireAt") or 0) != at):
                 lk["expired"] = expired
                 lk["expireText"] = text
                 # 还剩几天 —— 界面用它在「快到期」时提醒（≤30 天）
                 lk["expireDays"] = days
+                lk["expireAt"] = at
                 changed = True
         if changed and not self._closing:
             # 已经算好新数据了，直接推给界面（和详情加载走同一条信号）
@@ -2133,17 +2139,36 @@ class Core(QObject):
         #   全冲掉了** —— 用户看到的就是「百度网盘还是不显示过期」。
         #   现在按 url 把 rec 里已经查到的状态回填过来。
         known = {str(x.get("url") or ""): x for x in (rec.get("links") or [])}
+        now = time.time()
         for lk in d["links"]:
             u = str(lk.get("url") or "")
             src = known.get(u)
-            if src:
+            at = int((src or {}).get("expireAt") or 0)
+            if src and at:
+                # ★ 只信 `expireAt` 这个绝对值：`expireDays` 是按查询时刻算的
+                #   相对天数，隔天再看就错了（用户报的「昨天 7 天今天还是 7 天」）。
+                #   所以这里一律用 PANS.refresh 按当前时间重算。
+                lk.update(PANS.refresh({
+                    "ok": bool(src.get("ok", True)),
+                    "state": ("expired" if src.get("expired") else "ok"),
+                    "text": str(src.get("expireText") or ""),
+                    "expireAt": at,
+                }, now))
+                # `_refresh` 用的是 `text`（panshare 内部字段名），
+                # 界面绑的是 `expireText`，这里对一下名字。
+                lk["expireText"] = str(lk.get("text") or src.get("expireText") or "")
+            elif src:
+                # 兼容老数据：早期只存了相对天数、没有 expireAt 的，
+                # 保留原值显示（总比什么都不显示强），下次查询会补上 expireAt。
                 lk["expired"] = bool(src.get("expired"))
                 lk["expireText"] = str(src.get("expireText") or "")
                 lk["expireDays"] = int(src.get("expireDays") or 0)
+                lk["expireAt"] = 0
             else:
                 lk.setdefault("expired", False)
                 lk.setdefault("expireText", "")
                 lk.setdefault("expireDays", 0)
+                lk.setdefault("expireAt", 0)
         return d
 
     # ================================================================= 封面
@@ -2507,11 +2532,58 @@ class Core(QObject):
         return m
 
     # ---------------------------------------------------------------- Steam API Key
-    # ★ 2026-11 已彻底移除。
-    #   工坊列表/搜索改成抓 Steam 工坊网页（steamcommunity.com/workshop/browse/），
-    #   那个页面不需要 key；详情、下载、合集展开本来也不用 key。
-    #   因此设置里不再有这一栏，config 里的 steam_api_key 也不再被读取
-    #   （老配置里残留的那个空串不影响任何东西）。
+    #
+    # ★ 这不是「必需品」，而是「救急开关」。
+    #
+    #   工坊列表**正常情况仍然抓网页**（steamcommunity.com/workshop/browse/），
+    #   那个页面不需要 key。
+    #
+    #   但实测国内 `steamcommunity.com` 经常**整站不可达**
+    #   （系统 DNS 被污染到 Facebook 的 IP 段，换公共 DNS 解析出的 IP 也全部超时），
+    #   而 `api.steampowered.com` 一直通。这种情况下唯一的出路是回退到官方
+    #   `IPublishedFileService/QueryFiles` —— 它**必须带 key**。
+    #
+    #   所以：填了 key 就多一条活路，不填只影响「网页挂了的时候」。
+    #   key 只存本地 config.json，不上传。
+    @Property(str, notify=statusChanged)
+    def steamApiKey(self) -> str:
+        """当前保存的 key（给输入框回显用）。"""
+        return str(self.config["steam_api_key"] or "")
+
+    @Property(bool, notify=statusChanged)
+    def hasSteamApiKey(self) -> bool:
+        return bool(str(self.config["steam_api_key"] or "").strip())
+
+    # 输入框里正在编辑、还没点「保存」的草稿（避免每敲一个字符就落盘）
+    _steam_key_draft = ""
+
+    @Slot(str)
+    def setSteamApiKeyDraft(self, text: str) -> None:
+        """记下输入框的草稿（不落盘，等用户点保存）。"""
+        self._steam_key_draft = str(text or "").strip()
+
+    @Slot()
+    def saveSteamApiKey(self) -> None:
+        """把草稿写进配置（点「保存」时调）。"""
+        key = str(getattr(self, "_steam_key_draft", "") or "").strip()
+        self.config["steam_api_key"] = key
+        self.config.save()
+        if key:
+            self._set_status("已保存 Steam API Key（工坊网页连不上时会用它兜底）")
+            self.toast("已保存 Steam API Key", "ok")
+        else:
+            self._set_status("API Key 是空的，没有保存")
+            self.toast("Key 是空的，没有保存", "warn")
+        self.statusChanged.emit()
+
+    @Slot()
+    def clearSteamApiKey(self) -> None:
+        self._steam_key_draft = ""
+        self.config["steam_api_key"] = ""
+        self.config.save()
+        self._set_status("已清空 Steam API Key")
+        self.toast("已清空 Steam API Key", "info")
+        self.statusChanged.emit()
 
     @Slot("QVariantMap")
     def openPanLink(self, link: dict) -> None:

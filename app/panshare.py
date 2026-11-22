@@ -44,10 +44,28 @@ B 站简介里的百度网盘链接经常是几个月前贴的，点开才发现
 
 - 一次查一条，调用方自己决定并发（见 `check_many`）；
 - 结果缓存 30 分钟：同一个视频重复点开不该重复打接口；
+- ★ 缓存里只存**绝对时间戳**，`expireDays` 这类相对值每次用 `_refresh`
+  按当前时间现算 —— 详见下面「相对天数为啥不能缓存」；
 - 任何异常都**不当成过期**（网络抖动时宁可显示「未知」，也不要误伤正常链接）。
+
+## 相对天数为啥不能缓存、更不能落盘
+
+用户报的原话：
+
+> 昨天是 7 天后，今天我再看还是 7 天后，实际是 6 天后
+
+`expireDays` 是「查的那一刻」算出来的相对值，一旦被缓存（甚至被写进
+`library.json`）就永远定在那儿了。真正稳定的是 `expireAt`（绝对时间戳）。
+所以：
+
+1. `check()` 返回前用 `_refresh()` 现算一次；
+2. 缓存命中时同样 `_refresh()` 现算；
+3. `store.Library.save()` 落盘时剔除 `expireDays` / `expireText` / `expired`，
+   `load()` 时把历史脏数据也清掉（见 `app/store.py`）。
 """
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import threading
@@ -125,32 +143,72 @@ def _unknown() -> dict:
             "expireDays": 0}
 
 
+def _days_left(expire_s: int, now: float) -> int:
+    """还剩几个**日历天**。
+
+    ★ 为什么不用 `(expire - now) // 86400`：那是「还剩几个 24 小时」，
+      跨天时不会变 —— 用户看到的正是这个毛病：
+
+          昨天点开：「7 天后到期」
+          今天再点开：「7 天后到期」   ← 实际只剩 6 天
+
+      因为「发布时刻 + 7×86400」到第二天仍然差 6 天零 23 小时，
+      向上取整还是 7。改成**按日历日相减**才对得上人的数法：
+      今天 22 日、到期 29 日 → 7 天；过了零点变成 23 日 → 6 天。
+    """
+    try:
+        end = time.localtime(expire_s)
+        cur = time.localtime(now)
+        d_end = datetime.date(end.tm_year, end.tm_mon, end.tm_mday)
+        d_cur = datetime.date(cur.tm_year, cur.tm_mon, cur.tm_mday)
+        return (d_end - d_cur).days
+    except (ValueError, OSError, OverflowError):
+        # 时间戳异常时按 24 小时折算兜底，别让界面上的角标消失
+        return max(1, int((expire_s - now) // 86400) + 1)
+
+
 def _judge(expire_s: int, now: float) -> dict:
     """按「过期时间戳（秒）」给出结论。0 = 永久有效。
 
     百度和夸克的时间戳单位不同（百度秒、夸克毫秒），
     但统一换算成秒之后判断逻辑是一样的，所以抽在这儿。
+
+    ★ 返回值里必须同时给出 `expired`（布尔）和 `expireDays`（相对天数）：
+      它们是界面直接绑定的字段，而 `_refresh()` 会用本函数的返回值**整体替换**
+      旧 dict —— 少一个键，QML 那边就拿到 undefined（表现为角标不显示）。
     """
     if not expire_s:
         return {"ok": True, "state": "ok", "text": "永久有效", "expireAt": 0,
-                "expireDays": 0}
-    if expire_s < now:
+                "expireDays": 0, "expired": False}
+    if expire_s <= now:
         return {"ok": True, "state": "expired",
                 "text": f"已过期（{_fmt(expire_s)}）", "expireAt": expire_s,
-                "expireDays": 0}
-    days = max(0, int((expire_s - now) // 86400))
-    if days == 0:
-        # 不足一天 → 显示「今天到期」比「0 天后到期」自然
-        days = 1
-    else:
-        # ★ 向上取整：`expire - now` 常因为时间戳精度差几百毫秒，
-        #   7×86400 会算成 6 天多一点点 → 向下取整就变成「6 天后到期」，
-        #   和接口说的 expired_days=7 对不上，看着像算错了。
-        #   只要还剩任何零头，就按「多一天」算更符合直觉。
-        if (expire_s - now) % 86400:
-            days += 1
+                "expireDays": 0, "expired": True}
     return {"ok": True, "state": "ok", "text": f"{_fmt(expire_s)} 到期",
-            "expireAt": expire_s, "expireDays": days}
+            "expireAt": expire_s, "expireDays": _days_left(expire_s, now),
+            "expired": False}
+
+
+def _refresh(res: dict, now: float) -> dict:
+    """把一份结果里的**相对字段**按「此刻」重算一遍。
+
+    ★ `expireAt`（绝对时间戳）永远是对的，`expireDays` / `state` / `text`
+      只是它在某一刻的投影。所以缓存和落盘都只该保存绝对值，
+      每次要显示时用这个函数现算 —— 跨天、跨周都不会再显示旧数字。
+    """
+    out = dict(res or {})
+    state = str(out.get("state") or "ok")
+    at = int(out.get("expireAt") or 0)
+    if state in ("gone", "unknown") or not at:
+        # 永久有效 / 分享没了 / 查不到：没有「还剩几天」这回事
+        out["expireDays"] = 0
+        out["expired"] = state in ("expired", "gone")
+        out.setdefault("text", "")
+        out.setdefault("expireAt", 0)
+        return out
+    fresh = _judge(at, now)
+    fresh["ok"] = bool(out.get("ok", True))
+    return fresh
 
 
 def _check_baidu(url: str, now: float, timeout: float) -> dict:
@@ -257,6 +315,11 @@ def _check_quark(url: str, now: float, timeout: float,
     return res
 
 
+def refresh(res: dict, now: float | None = None) -> dict:
+    """公开版 `_refresh`：给别的模块（`core`）按当前时间重算相对天数。"""
+    return _refresh(res, time.time() if now is None else now)
+
+
 def check(url: str, timeout: float = 8.0, passcode: str = "") -> dict:
     """检查一条链接的状态（目前支持百度网盘、夸克网盘）。
 
@@ -287,7 +350,9 @@ def check(url: str, timeout: float = 8.0, passcode: str = "") -> dict:
     with _LOCK:
         hit = _CACHE.get(ck)
         if hit and now - hit[0] < _CACHE_TTL:
-            return dict(hit[1])
+            # ★ 缓存里只存了绝对时间戳，相对天数每次现算 ——
+            #   否则「昨天查的 7 天」会一直缓存到明天还是 7 天。
+            return _refresh(hit[1], now)
 
     try:
         host = (urllib.parse.urlparse(key).hostname or "").lower()
@@ -303,7 +368,7 @@ def check(url: str, timeout: float = 8.0, passcode: str = "") -> dict:
 
     with _LOCK:
         _CACHE[ck] = (now, res)
-    return dict(res)
+    return _refresh(res, now)
 
 
 def check_many(urls: Iterable[str], workers: int = 4,

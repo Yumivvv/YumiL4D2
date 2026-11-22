@@ -81,6 +81,35 @@ BUILTIN_CDN_IPS = (
     "23.67.75.74",
 )
 
+# ★ 扩充的候选池（参考 SteamTools/Watt Toolkit 的做法：候选越多、越容易撞上近节点）。
+#
+# 出处与改动说明（GPL-3.0，尊重上游）：
+#   SteamTools（BeyondDimension/SteamTools，GPL-3.0）的加速是「本地反向代理 + 本地 CA」，
+#   和本项目「直连 CDN IP、不改证书」是两套机制，这里**没有移植它的代理代码**。
+#   借鉴的是它的两点工程思路：
+#     1. 候选 IP 要按**区域**分组管理，而不是一锅乱炖 —— 国内到首尔/大阪/新加坡
+#        的延迟差异很大，按区域先筛一遍能少测一半的 IP；
+#     2. 选节点不能只看 TCP 延迟，要看**实际传输速度**（见 _probe_one 的吞吐采样）。
+#   IP 本身是 Steam CDN（Akamai/Valve）的公开节点地址，不是谁的私有数据。
+CDN_IP_REGIONS: dict[str, tuple[str, ...]] = {
+    "首尔": ("23.59.72.59", "23.59.72.42", "23.206.175.162",
+             "23.206.175.170", "23.45.72.14", "23.45.72.30"),
+    "大阪": ("23.55.51.221", "23.67.75.74", "23.55.51.205", "23.67.75.90"),
+    "东京": ("23.193.186.33", "23.193.186.51", "23.41.200.20"),
+    "新加坡": ("2.17.106.6", "2.17.106.18", "23.61.202.191", "23.61.202.175"),
+    "台北": ("184.26.127.25", "184.26.127.43", "184.26.127.59"),
+    "香港": ("23.58.156.11", "23.58.156.27"),
+}
+
+# 把所有区域的 IP 摊平，去重保序 —— 测速的候选池就是它
+_ALL_REGION_IPS: tuple[str, ...] = tuple(dict.fromkeys(
+    ip for ips in CDN_IP_REGIONS.values() for ip in ips))
+
+# 两阶段测速：先全量测延迟，只给最快的这几个做**吞吐实测**。
+# 为什么不全量测吞吐：36 个候选各拉 64KB，网络差时能拖到一分钟，
+# 而「握手快 + 下载慢」的坏节点基本都在延迟头部才会骗到人。
+_TOP_FOR_THROUGHPUT = 5
+
 # 节点地名表：IP 只留在程序内部，UI 一律用地名。
 # 远端节点池（见 CDN_POOL_URL）会带上「steam官方-首尔」这种分类，
 # 优先用它的地名；表里这些是远端挂掉时的兜底。
@@ -205,11 +234,22 @@ def _region_from_category(category: str) -> str:
 
 
 def region_for_ip(ip: str) -> str:
-    """IP → 地名。查不到就返回「未知地区」，绝不把 IP 甩给用户。"""
+    """IP → 地名。查不到就返回「未知地区」，绝不把 IP 甩给用户。
+
+    两级查找：先查地名表 `IP_REGION_HINTS`（人工标注，最准），
+    再查区域分组表 `CDN_IP_REGIONS`（新增的 IP 都登记在那里，
+    不用再去维护两份表）。
+    """
     key = str(ip or "").strip()
     if not key:
         return ""
-    return IP_REGION_HINTS.get(key) or "未知地区"
+    hit = IP_REGION_HINTS.get(key)
+    if hit:
+        return hit
+    for region, ips in CDN_IP_REGIONS.items():
+        if key in ips:
+            return region
+    return "未知地区"
 
 
 def fetch_cdn_nodes(timeout: float = 8.0) -> list[dict]:
@@ -249,11 +289,18 @@ def fetch_cdn_nodes(timeout: float = 8.0) -> list[dict]:
             pass
 
     # 内置节点永远补上（远端池就算有也常常漏掉大阪这类）
-    for ip in BUILTIN_CDN_IPS:
-        if ip in seen:
-            continue
-        seen.add(ip)
-        nodes.append({"ip": ip, "region": region_for_ip(ip)})
+    #
+    # ★ 这里改用**按区域分组的完整候选池**（`CDN_IP_REGIONS`），
+    #   而不是原来那 6 个固定的 —— 参考 SteamTools 的思路：候选越多，
+    #   越容易撞上当前网络下真正快的节点。
+    #   区域名直接从分组键取，不依赖 IP 反查（新加的 IP 在
+    #   `IP_REGION_HINTS` 里可能没有，反查会得到「未知地区」）。
+    for region, ips in CDN_IP_REGIONS.items():
+        for ip in ips:
+            if ip in seen:
+                continue
+            seen.add(ip)
+            nodes.append({"ip": ip, "region": region})
     return nodes
 
 
@@ -268,15 +315,26 @@ def pick_cdn_node(nodes: list[dict], region: str) -> dict:
     return {}
 
 
-def _probe_one(ip: str, timeout: float = 3.0) -> dict:
+def _probe_one(ip: str, timeout: float = 3.0,
+               throughput: bool = False,
+               sample_bytes: int = 64 * 1024) -> dict:
     """测一个 IP 到 Steam CDN 的连通性和延迟（毫秒），失败返回 -1。
 
     ★ 关键点：连的是 IP，但 TLS 的 **SNI 必须是域名** —— 否则服务器返回的证书
       是给 IP 签的（或者干脆是默认证书），Python 会直接
       `SSLCertVerificationError`。这也是「把域名换成 IP」最容易被忽略的一步。
+
+    ★ `throughput=True` 时额外做一次**吞吐采样**（参考 SteamTools 的做法）：
+      光看 TCP 握手快不等于下载快 —— 有的节点握手 20ms、拉文件却只有 200KB/s。
+      这里读 `sample_bytes` 个字节并计时，把 KB/s 一起带回去，
+      选节点时两者都考虑（见 `best_ip`）。
+
+      sample_bytes 默认 64 KiB：足够区分「快/慢」两档，又不至于让一次测速
+      拖太久（36 个候选 × 64KB，家用带宽下约十几秒）。
     """
     t0 = time.time()
     ctx = ssl.create_default_context()
+    got = 0
     try:
         raw_sock = socket.create_connection((ip, 443), timeout=timeout)
         # server_hostname 显式给域名 → 发出去的 SNI 是域名，证书能对上
@@ -284,23 +342,51 @@ def _probe_one(ip: str, timeout: float = 3.0) -> dict:
         conn = http.client.HTTPSConnection(STEAM_CDN_HOST, 443, timeout=timeout)
         # 复用已经建好的 TLS 连接，避免再自己握手一次
         conn.sock = sock
-        conn.putrequest("HEAD", _PROBE_PATH, skip_host=True, skip_accept_encoding=True)
+        if throughput:
+            conn.putrequest("GET", _PROBE_PATH, skip_host=True,
+                            skip_accept_encoding=True)
+        else:
+            conn.putrequest("HEAD", _PROBE_PATH, skip_host=True,
+                            skip_accept_encoding=True)
         conn.putheader("Host", STEAM_CDN_HOST)
         conn.putheader("User-Agent", UA)
         conn.endheaders()
         resp = conn.getresponse()
-        resp.read(64)
+        if throughput:
+            t_data = time.time()
+            while got < sample_bytes:
+                chunk = resp.read(min(8192, sample_bytes - got))
+                if not chunk:
+                    break
+                got += len(chunk)
+            dt = max(0.001, time.time() - t_data)
+        else:
+            resp.read(64)
+            dt = 0.0
         ok = resp.status < 500
         conn.close()
     except (OSError, ssl.SSLError, http.client.HTTPException) as e:
-        return {"ip": ip, "ms": -1, "ok": False, "error": type(e).__name__}
+        return {"ip": ip, "ms": -1, "ok": False, "error": type(e).__name__,
+                "kbps": 0}
     ms = int((time.time() - t0) * 1000)
-    return {"ip": ip, "ms": ms if ok else -1, "ok": ok, "error": "" if ok else "bad status"}
+    kbps = int(got / dt / 1024) if (throughput and dt > 0 and got) else 0
+    return {"ip": ip, "ms": ms if ok else -1, "ok": ok,
+            "error": "" if ok else "bad status", "kbps": kbps}
 
 
 def test_ips(ips: Iterable[str], timeout: float = 3.0,
-             progress: Callable[[int, int], None] | None = None) -> list[dict]:
-    """并发测一批 IP，按延迟从快到慢返回。"""
+             progress: Callable[[int, int], None] | None = None,
+             throughput: bool = False) -> list[dict]:
+    """并发测一批 IP，按「快不快」排序返回。
+
+    `throughput=True` 时先按延迟粗排、再对**前几个**做吞吐实测（参考
+    SteamTools 的两阶段做法）：
+      * 全量做吞吐采样太慢（36 个 × 64KB，网络差时能拖到一分钟）；
+      * 只对延迟最好的前 `_TOP_FOR_THROUGHPUT` 个采样，既快又能避掉
+        「握手快、下载慢」的节点。
+
+    排序规则：先看能不能用，再看吞吐（有数据时），最后看延迟。
+    """
     targets = normalize_ip_list(ips)
     if not targets:
         return []
@@ -328,49 +414,82 @@ def test_ips(ips: Iterable[str], timeout: float = 3.0,
     for t in threads:
         t.join()
 
-    results.sort(key=lambda x: (0 if x["ok"] else 1, x["ms"] if x["ms"] >= 0 else 10 ** 9))
+    results.sort(key=lambda x: (0 if x["ok"] else 1,
+                                x["ms"] if x["ms"] >= 0 else 10 ** 9))
+
+    if throughput:
+        # 第二阶段：只给最快的几个测真实传输速度
+        top = [r for r in results if r["ok"]][:_TOP_FOR_THROUGHPUT]
+        for r in top:
+            t2 = _probe_one(r["ip"], max(timeout, 4.0), throughput=True)
+            if t2.get("ok"):
+                r["kbps"] = int(t2.get("kbps") or 0)
+        # 有吞吐数据的按 kbps 降序（吞吐为 0 的当未知，排在有数据的后面）
+        with_speed = [r for r in top if r.get("kbps")]
+        if with_speed:
+            best_speed = max(r["kbps"] for r in with_speed)
+            for r in results:
+                if r.get("kbps"):
+                    # 吞吐达到最快节点的 70% 就算「一样快」，再按延迟排
+                    r["_speed_ok"] = r["kbps"] >= best_speed * 0.7
+                else:
+                    r["_speed_ok"] = False
+            results.sort(key=lambda x: (
+                0 if x["ok"] else 1,
+                0 if x.get("_speed_ok") else 1,
+                x["ms"] if x["ms"] >= 0 else 10 ** 9))
     return results
 
 
-def best_ip(ips: Iterable[str] | None = None, timeout: float = 3.0) -> dict:
+def best_ip(ips: Iterable[str] | None = None, timeout: float = 3.0,
+            throughput: bool = True) -> dict:
     """挑最快的 IP。全都失败时返回空结果。
 
     结果的 `region` 是地名（UI 只展示它，`ip` 留给自己用）。
     """
     pool = normalize_ip_list(ips or BUILTIN_CDN_IPS)
-    res = test_ips(pool, timeout)
+    res = test_ips(pool, timeout, throughput=throughput)
     good = [r for r in res if r["ok"]]
     if not good:
-        return {"ok": False, "ip": "", "region": "", "ms": -1,
-                "tested": len(res), "all": res, "error": "所有节点都连不上"}
-    return {"ok": True, "ip": good[0]["ip"], "region": region_for_ip(good[0]["ip"]),
-            "ms": good[0]["ms"], "tested": len(res), "all": res, "error": ""}
+        # ★ 全失败时回退到内置表第一个：总比「加速开着但一个节点都不用」好
+        fallback = pool[0] if pool else ""
+        return {"ok": False, "ip": fallback,
+                "region": region_for_ip(fallback) if fallback else "",
+                "ms": -1, "tested": len(res), "all": res,
+                "error": "所有节点都连不上，已回退到内置默认节点"}
+    top = good[0]
+    return {"ok": True, "ip": top["ip"], "region": region_for_ip(top["ip"]),
+            "ms": top["ms"], "kbps": int(top.get("kbps") or 0),
+            "tested": len(res), "all": res, "error": ""}
 
 
-def best_node(nodes: list[dict] | None = None, timeout: float = 4.0) -> dict:
-    """在节点池里测速挑最快的一个，返回 {ok, ip, region, ms, rows}。
+def best_node(nodes: list[dict] | None = None, timeout: float = 4.0,
+              throughput: bool = True) -> dict:
+    """在节点池里测速挑最快的一个，返回 {ok, ip, region, ms, kbps, rows}。
 
-    `rows` 每项 {region, ms, ok} —— 只有地名和延迟，可以安全交给 UI。
+    `rows` 每项 {region, ms, kbps, ok} —— 只有地名和数字，可以安全交给 UI。
     """
     pool = nodes or fetch_cdn_nodes()
     ips = normalize_ip_list([n.get("ip") for n in pool])
     region_of = {str(n.get("ip")): str(n.get("region") or "") for n in pool
                  if n.get("ip")}
     if not ips:
-        return {"ok": False, "ip": "", "region": "", "ms": -1,
+        return {"ok": False, "ip": "", "region": "", "ms": -1, "kbps": 0,
                 "rows": [], "error": "没有可用的加速节点"}
-    res = test_ips(ips, timeout)
+    res = test_ips(ips, timeout, throughput=throughput)
     rows = [{"region": region_of.get(r["ip"]) or region_for_ip(r["ip"]),
-             "ms": int(r.get("ms") or -1), "ok": bool(r.get("ok"))}
+             "ms": int(r.get("ms") or -1), "kbps": int(r.get("kbps") or 0),
+             "ok": bool(r.get("ok"))}
             for r in res]
     good = [r for r in res if r.get("ok") and r.get("ms", -1) >= 0]
     if not good:
-        return {"ok": False, "ip": "", "region": "", "ms": -1,
+        return {"ok": False, "ip": "", "region": "", "ms": -1, "kbps": 0,
                 "rows": rows, "error": "所有节点都连不上"}
     top = good[0]
     return {"ok": True, "ip": top["ip"],
             "region": region_of.get(top["ip"]) or region_for_ip(top["ip"]),
-            "ms": int(top.get("ms") or -1), "rows": rows, "error": ""}
+            "ms": int(top.get("ms") or -1), "kbps": int(top.get("kbps") or 0),
+            "rows": rows, "error": ""}
 
 
 def rewrite_url(url: str, ip: str) -> tuple[str, dict]:
@@ -886,6 +1005,13 @@ def _translate_chunk_transmart(chunk: str, target: str, timeout: float,
 WORKSHOP_BROWSE_URL = (
     "https://steamcommunity.com/workshop/browse/")
 
+# 回退用的官方 JSON 列表接口（**需要 Steam Web API Key**）。
+# 只在网页版连不上时启用，见 `_query_files_fallback`。
+WORKSHOP_QUERY_API = (
+    "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/")
+# QueryFiles 的排序枚举：0 = 热度 / 1 = 最新 / 3 = 最高评分
+_STEAM_QUERY_SORT = {"trend": 0, "recent": 1, "top": 3}
+
 # 排序：trend=热门 / recent=最新 / top=评分最高
 SORT_MODES = ("trend", "recent", "top")
 # 网页版浏览页的 browsesort 取值（和 API 的枚举不同，这些是网页自己的名字）
@@ -982,7 +1108,8 @@ def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
                 "hasMore": bool(res.get("hasMore", False)),
                 "cached": True}
 
-    res = _fetch_workshop_list_net(query, page, sort, list(tag_key), kind, timeout)
+    res = _fetch_workshop_list_net(query, page, sort, list(tag_key), kind,
+                                   timeout, api_key)
     if res.get("ok"):
         with _LIST_LOCK:
             _LIST_CACHE[key] = (time.time(), {
@@ -1000,6 +1127,84 @@ def fetch_workshop_list(query: str = "", page: int = 1, sort: str = "trend",
     return res
 
 
+def _query_files_fallback(page: int, sort: str, query: str, tags: object,
+                          kind: str, timeout: float,
+                          api_key: str) -> dict | None:
+    """网页版抓不到时的回退：走官方 `IPublishedFileService/QueryFiles`。
+
+    返回 None 表示「这条回退用不了」（没配 key / 接口也不通），
+    调用方据此走原来的报错分支。
+
+    ★ 为什么用这个当回退而不是主路径：
+      它**强制要求 Steam Web API Key**，对普通用户是额外门槛。
+      所以正常情况仍优先抓网页（不需要 key），只在网页不通时才用它救急。
+      而 `api.steampowered.com` 在国内的连通性明显好过 `steamcommunity.com`
+      （实测前者 123ms 正常、后者整站超时），所以这条回退真的能救命。
+    """
+    key = str(api_key or "").strip()
+    if not key:
+        return None
+
+    tag_list = normalize_tags(tags)
+    params = {
+        "key": key,
+        "query_type": _STEAM_QUERY_SORT.get(normalize_sort(sort), 0),
+        "page": normalize_page(page) - 1,      # QueryFiles 的页码从 0 开始
+        "numperpage": 30,
+        "creator_appid": 550,
+        "appid": 550,
+        "filetype": 0 if normalize_kind(kind) == "mod" else 1,
+        "return_previews": "true",
+        "return_short_description": "true",
+        "return_metadata": "true",
+    }
+    if query:
+        params["search_text"] = query
+    if tag_list:
+        params["requiredtags"] = ",".join(tag_list)
+
+    try:
+        resp = NC.get(WORKSHOP_QUERY_API, params=params,
+                      headers={"User-Agent": UA},
+                      timeout=(6, max(10, int(timeout))))
+        if int(getattr(resp, "status_code", 0) or 0) != 200:
+            return None
+        js = resp.json()
+    except Exception as e:  # noqa: BLE001
+        log(f"QueryFiles fallback failed: {e!r}")
+        return None
+
+    body = js.get("response") or {}
+    raw = body.get("publishedfiledetails") or []
+    items: list[dict] = []
+    for it in raw:
+        wid = str(it.get("publishedfileid") or "")
+        if not wid:
+            continue
+        tags_out = [str(t.get("tag") or "").strip()
+                    for t in (it.get("tags") or []) if isinstance(t, dict)]
+        items.append({
+            "id": wid,
+            "title": (it.get("title") or "").strip(),
+            "preview": it.get("preview_url") or "",
+            "author": str(it.get("creator") or ""),
+            "fileType": int(it.get("file_type") or 0),
+            "views": int(it.get("views") or 0),
+            "subs": int(it.get("subscriptions") or 0),
+            "favorited": int(it.get("favorited") or 0),
+            "children": int(it.get("num_children") or 0),
+            "created": int(it.get("time_created") or 0),
+            "updated": int(it.get("time_updated") or 0),
+            "tags": [t for t in tags_out if t],
+        })
+    return {"ok": True, "items": items,
+            "total": int(body.get("total") or 0),
+            "page": normalize_page(page), "error": "",
+            "hasMore": len(items) >= 30,
+            # 告诉界面「这次走了回退」，可以据此提示用户
+            "viaFallback": True}
+
+
 def clear_list_cache() -> None:
     """清空列表缓存（设置里改节点、或测试要拿实时数据时用）。"""
     with _LIST_LOCK:
@@ -1008,7 +1213,8 @@ def clear_list_cache() -> None:
 
 def _fetch_workshop_list_net(query: str = "", page: int = 1, sort: str = "trend",
                              tags: object = None, kind: str = "mod",
-                             timeout: float = 25.0) -> dict:
+                             timeout: float = 25.0,
+                             api_key: str = "") -> dict:
     """真正去抓一次工坊浏览页（没有缓存）—— 走 Steam 官方网页，**不需要 API Key**。
 
     抓回来的只有 ID / 封面 / 标题（网页卡片里就这些）。体积、作者、订阅数、
@@ -1060,11 +1266,28 @@ def _fetch_workshop_list_net(query: str = "", page: int = 1, sort: str = "trend"
             resp = None
             if attempt == 0:
                 time.sleep(0.8)
+
+    # ★★ 网页版抓不到 → 回退到官方 `IPublishedFileService/QueryFiles`
+    #
+    #   为什么必须加这条：`steamcommunity.com` 在国内**经常整站不可达**
+    #   （实测系统 DNS 被污染到 157.240.2.50 这种 Facebook 段，换公共 DNS
+    #   解析出的 IP 也全部超时），而 `api.steampowered.com` 一直是通的。
+    #   以前没有回退，结果就是「加速开了、封面也快了，但工坊列表整个打不开」——
+    #   用户说的「创意工坊还是没加速到」就是它：阻塞点根本不在 CDN，
+    #   而在列表这个域名的连通性上。
+    #
+    #   代价：QueryFiles 需要 Steam Web API Key（`api_key` 由调用方传入）。
+    #   没有 key 时这条回退不了，就照实报错（不会假装成功）。
     if resp is None:
+        fb = _query_files_fallback(page_n, sort_n, q, tags, kind_n,
+                                  timeout, api_key)
+        if fb is not None:
+            return fb
         return {"ok": False, "items": [], "total": 0, "page": page_n,
                 "error": (f"连不上 Steam 工坊页面（{last_err}）。"
                           "如果浏览器也打不开 steamcommunity.com，"
-                          "说明当前网络访问不了它，挂个加速器再试"),
+                          "说明当前网络访问不了它；"
+                          "配一个 Steam API Key 可以让列表改走官方接口"),
                 "needNetwork": True}
 
     status = int(getattr(resp, "status_code", 0) or 0)

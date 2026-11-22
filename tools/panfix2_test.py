@@ -180,20 +180,46 @@ def main():
         got = PS._quark_surl(url)
         check(f"解析 surl: {url[:40]:42s}", got == want, got)
 
-    # _judge 的边界语义（向上取整）
+    # _judge 的边界语义（★ 按**日历日**算，不是按 24 小时）
+    #
+    # 为什么要改这一节：以前这里断言的是「还剩 1.5 天 → 2 天」「今天到期 → 1 天」，
+    # 那是 24 小时制的算法。用户报的「昨天 7 天后、今天还是 7 天后」正是它造成的
+    # （`expire - now` 永远差 6 天 23 小时，向上取整恒为 7）。
+    # 改成日历日之后，这些用例的期望值必须跟着改，而且**不能再用「now + N 秒」**
+    # 来造数据 —— 那会随跑测试的时刻（离零点多远）落到不同日历天上，变成墙钟依赖。
+    # 所以这里统一按「今天零点 + K 天」造时间戳。
+    import datetime as _dt
     import time as _t
+
     now2 = _t.time()
+    _today = _dt.date.fromtimestamp(now2)
+    _midnight = _t.mktime(_dt.datetime.combine(_today, _dt.time(0, 0)).timetuple())
+
+    def _at_day(k: int, hour: int = 12) -> int:
+        """今天之后第 k 天的 hour 点（k 可为负）。"""
+        d = _today + _dt.timedelta(days=k)
+        return int(_t.mktime(_dt.datetime.combine(d, _dt.time(hour, 0)).timetuple()))
+
     for label, ts, want_state, want_days in (
         ("永久", 0, "ok", 0),                      # 0 = 没有时间戳
-        ("已过期 3 天", int(now2) - 86400 * 3, "expired", 0),
-        ("还剩 7 天", int(now2) + 86400 * 7, "ok", 7),
-        ("还剩 1.5 天", int(now2) + 86400 * 1.5, "ok", 2),
-        ("今天到期", int(now2) + 3600, "ok", 1),
+        ("已过期 3 天", _at_day(-3), "expired", 0),
+        ("还剩 7 天", _at_day(7), "ok", 7),
+        ("还剩 1 天", _at_day(1), "ok", 1),
+        ("今天到期", _at_day(0, 23), "ok", 0),      # 今天 23 点 = 还剩 0 个日历天
     ):
         got = PS._judge(ts, now2)
         check(f"_judge {label:10s}", got.get("state") == want_state
               and int(got.get("expireDays") or 0) == want_days,
               f"{got.get('state')}/{got.get('expireDays')}")
+
+    # 跨天必须真的少一天（这就是用户报的那个 bug 的核心）
+    _e = _at_day(7)
+    check("_judge 隔天少一天",
+          int(PS._judge(_e, now2).get("expireDays") or 0) - 1
+          == int(PS.refresh({"ok": True, "state": "ok", "text": "",
+                             "expireAt": _e}, now2 + 86400).get("expireDays") or 0),
+          f"{PS._judge(_e, now2).get('expireDays')} → "
+          f"{PS.refresh({'ok': True, 'state': 'ok', 'text': '', 'expireAt': _e}, now2 + 86400).get('expireDays')}")
 
     # 真实夸克链接（联网失败只 skip）
     qr = PS.check("https://pan.quark.cn/s/a96b2f056eae")

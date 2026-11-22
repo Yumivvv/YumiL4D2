@@ -267,12 +267,21 @@ def main() -> int:
     # 前面「MOD 下载入口」那一段会真去联网解析直链，任务可能还没结束；
     # 只调 clearFinished() 是清不掉它们的（它只清已结束的），于是
     # summaryText 会说「1 个进行中」—— 那是测试自己没收拾干净，不是产品问题。
-    for t in dq.tasks:
-        if t.get("active"):
-            dq.cancelTask(t["id"])
-    wait_until(lambda: dq.activeCount == 0, ms=10000)
-    dq.clearFinished()
-    pump(200)
+    #
+    # ★ 为什么不能「取消一次就断言」：取消是**异步**的 ——
+    #   `cancelTask` 只是置了标志，工作线程要跑完当前那一步才会把 active 落成 False。
+    #   套件里前面几项更慢、机器更忙，这段收尾时间就变长，于是偶尔会
+    #   在「还没真结束」时断言 → 报「1 个进行中」。
+    #   现在改成「反复取消 + 等 + 清，直到真的空了」，最多试 20 轮（约 4 秒）。
+    for _ in range(20):
+        for t in dq.tasks:
+            if t.get("active"):
+                dq.cancelTask(t["id"])
+        wait_until(lambda: dq.activeCount == 0, ms=3000)
+        dq.clearFinished()
+        pump(120)
+        if not dq.tasks:
+            break
     check("空队列说人话", dq.summaryText == "还没有下载", dq.summaryText)
 
     print("\n-- QML / 集成源码断言", flush=True)

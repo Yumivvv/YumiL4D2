@@ -62,6 +62,50 @@ def spin(ms: int) -> None:
     loop.exec()
 
 
+def settle(mgr, quiet_ms: int = 600, limit_ms: int = 45000) -> None:
+    """等到列表**彻底静止**：不在拉取、不在追加、条数连续 quiet_ms 不变。
+
+    ★ 为什么必须等：本用例验的是「滚动位置会不会被重置」，而一次**尚在飞行中**
+      的网络请求回来时，`_browse_apply` 会整个换掉 `_browse_items` 并
+      `browseChanged.emit()`；QML 那边第 1 页会 `positionViewAtBeginning()`。
+      以前不等静止，测试摆好 contentY 之后正好被这一下打回 0 ——
+      表现为 `FAIL 滚动条真的滚下去了 contentY=-0` 和 `50 → 50` 这种
+      「看起来像产品 bug，其实是测试自己被动过」的假失败。
+    """
+    waited = 0
+    last = -1
+    stable = 0
+    while waited < limit_ms:
+        busy = bool(getattr(mgr, "browseLoading", False)) or \
+            bool(getattr(mgr, "browseLoadingMore", False))
+        n = len(mgr.browseItems)
+        if busy or n != last:
+            stable = 0
+            last = n
+        else:
+            stable += 100
+            if stable >= quiet_ms:
+                return
+        spin(100)
+        waited += 100
+
+
+def set_content_y(grid, want: float, tries: int = 6) -> float:
+    """把 contentY 摆到 want 并**确认它真的停在那儿**。
+
+    布局/绑定可能在下一次事件循环里把值改回去，所以设完要回读；
+    没生效就重设，最多试 tries 次，返回最后一次读到的值。
+    """
+    y = 0.0
+    for _ in range(tries):
+        grid.setProperty("contentY", want)
+        spin(120)
+        y = float(grid.property("contentY"))
+        if abs(y - want) < 1.0:
+            return y
+    return y
+
+
 def find_child(win, name: str):
     return win.findChild(QObject, name)
 
@@ -102,6 +146,12 @@ def main() -> int:
     # ★ 列表现在走 Steam 工坊网页，**不需要 API Key**，所以正常情况下能真拉到数据。
     #   只有网络不通（列表为空）时才塞假数据，让本测试专注验证它要验的东西：
     #   滚动位置不被重置 —— 而不是「有没有网」。
+    #
+    # ★★ 关键：先等首页**真正加载完**再决定要不要塞假数据。
+    #   以前这里是 `if not mgr.browseItems:` —— 首页请求还在飞行中时列表当然是空的，
+    #   于是塞了假数据；紧接着真数据回来（`_browse_apply` 换掉 _browse_items），
+    #   把假数据和刚摆好的滚动位置一起冲掉，报出一串假失败。
+    settle(mgr, quiet_ms=800, limit_ms=45000)
     injected_fake = False
     if not mgr.browseItems:
         fake = [{"id": str(3842272870 + i),
@@ -124,6 +174,7 @@ def main() -> int:
         waited += 250
     check("列表加载出内容", len(mgr.browseItems) > 0,
           f"{len(mgr.browseItems)} 条 / {waited}ms")
+    settle(mgr, quiet_ms=800, limit_ms=45000)
     first_count = len(mgr.browseItems)
 
     print("=== 2. 滚到底部，再让列表往下加载 ===")
@@ -135,10 +186,14 @@ def main() -> int:
     gh = float(grid.property("height"))
     max_y = max(0.0, ch - gh)
     print(f"      内容高 {ch:.0f} / 视口高 {gh:.0f} → 可滚 {max_y:.0f}")
-    grid.setProperty("contentY", max_y)
-    spin(200)
-    y_before = float(grid.property("contentY"))
+    y_before = set_content_y(grid, max_y)
     if max_y > 0:
+        # 摆不到底通常意味着还有请求在飞，等一等再摆一次
+        if y_before <= 0:
+            settle(mgr, quiet_ms=800, limit_ms=30000)
+            ch = float(grid.property("contentHeight"))
+            max_y = max(0.0, ch - float(grid.property("height")))
+            y_before = set_content_y(grid, max_y)
         check("滚动条真的滚下去了", y_before > 0, f"contentY={y_before:.0f}")
     else:
         print("      （这一页还不够长，A/B 两种情况都验证一下）")
@@ -165,7 +220,8 @@ def main() -> int:
         waited += 250
     check("追加到了更多条目", len(mgr.browseItems) > first_count,
           f"{first_count} → {len(mgr.browseItems)} / {waited}ms")
-    spin(800)
+    # 追加可能是多页连着回来，等它彻底停下再读位置，否则读到的是中间态
+    settle(mgr, quiet_ms=800, limit_ms=45000)
 
     y_after = float(grid.property("contentY"))
     ch_after = float(grid.property("contentHeight"))
