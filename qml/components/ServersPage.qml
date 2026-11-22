@@ -64,6 +64,9 @@ Item {
         return []
     }
 
+    // 用户自建的合集（「转到合集」弹窗用；比 groupList 干净，不含全部/未分类）
+    readonly property var collectionList: page.mgr ? (page.mgr.collections || []) : []
+
     // 点合集：切到那一组；再点一次「全部」就回全量
     function selectGroup(key) {
         page.groupKey = key
@@ -782,6 +785,29 @@ Item {
         return n
     }
 
+    // 勾选 / 取消扫描结果里的**一条**。
+    //
+    // ★ 必须**建一个新对象**再赋值，不能原地改：
+    //
+    //       var sel = page.scanChecked
+    //       sel[addr] = checked       // ← 改的是同一个 JS 对象
+    //       page.scanChecked = sel    // ← 同一个引用，QML 认为「没变」
+    //
+    //   `property var` 只有在赋一个**不同的对象**时才发 changed 信号。
+    //   原地改的话信号不发，依赖 `scanChecked` 的绑定（比如保存按钮的
+    //   `enabledBtn: scanSelectedCount() > 0`）就永远不会重算 ——
+    //   用户看到的就是「全不选之后再也勾不上、按钮一直是灰的、点不动」。
+    //   （主列表的 toggleChecked 一直是这么写的，所以那边没这个毛病。）
+    function toggleScanOne(addr, on) {
+        var next = ({})
+        var cur = page.scanChecked || {}
+        for (var k in cur)
+            if (cur[k]) next[k] = true
+        if (on) next[addr] = true
+        else delete next[addr]
+        page.scanChecked = next
+    }
+
     function toggleScanAll(on) {
         var sel = ({})
         for (var i = 0; i < page.scanResults.length; ++i)
@@ -827,6 +853,15 @@ Item {
     function openRenameGroup(g) {
         if (!g || !page.mgr)
             return
+        // 自建合集有自己的改名接口，别走「改自动合集名」那条路
+        if (g.kind === "custom") {
+            page.openCollectionDialog(g.collectionId, g.label,
+                                     (g.count || 0) + " 台服务器")
+            return
+        }
+        page.renameIsCustom = false
+        page.renameCid = ""
+        page.renameError = ""
         page.renameKey = String(g.key || "")
         page.renameLabel = String(g.label || "")
         page.renameHint = (g.count || 0) + " 台服务器"
@@ -836,12 +871,127 @@ Item {
     function applyRename() {
         if (!page.mgr)
             return
+        // 自建合集走自己的接口：它的 key 是 c:<id>，和自动合集的
+        // renameGroup（{addr: 组名}）完全是两套存储，用错了会静默不生效。
+        if (page.renameIsCustom) {
+            var rc = page.mgr.renameCollection(page.renameCid, page.renameLabel)
+            if (rc && rc.ok) {
+                page.renameOpen = false
+                page.selectGroup("c:" + page.renameCid)
+            } else {
+                page.renameError = (rc && rc.error) || "改名失败"
+            }
+            return
+        }
         var res = page.mgr.renameGroup(page.renameKey, page.renameLabel)
         if (res && res.ok) {
             page.renameOpen = false
             // 改名后合集 key 变了（手动名是 m: 开头），回到「全部」最不容易迷路
             page.selectGroup("all")
+        } else {
+            page.renameError = (res && res.error) || ""
         }
+    }
+
+    // ---- 自建合集 ----
+    // ★ 和「重命名自动合集」分开：自动合集的成员是算出来的，自建合集是存下来的。
+    //   界面上共用同一个弹窗（反正都是「起个名字」），但提交走各自的接口。
+    property string renameCid: ""
+    property bool renameIsCustom: false
+    property string renameError: ""
+
+    // 新建合集 / 重命名自建合集，共用 renameDlg。
+    //   cid 为空 = 新建；非空 = 改这个的名字
+    function openCollectionDialog(cid, label, hint) {
+        page.renameIsCustom = true
+        page.renameCid = String(cid || "")
+        page.renameKey = ""
+        page.renameLabel = String(label || "")
+        page.renameHint = String(hint || "")
+        page.renameError = ""
+        page.renameOpen = true
+    }
+
+    function applyCollectionDialog() {
+        if (!page.mgr)
+            return
+        var name = String(page.renameLabel || "").trim()
+        if (!name) {
+            page.renameError = "合集名不能为空"
+            return
+        }
+        var res = page.renameCid
+                ? page.mgr.renameCollection(page.renameCid, name)
+                : page.mgr.createCollection(name)
+        if (res && res.ok) {
+            page.renameOpen = false
+            page.renameError = ""
+            if (!page.renameCid && res.key)
+                page.selectGroup(res.key)     // 新建完直接切过去，省一次点击
+            page.renameCid = ""
+            page.renameIsCustom = false
+        } else {
+            page.renameError = (res && res.error) || "操作失败"
+        }
+    }
+
+    function deleteCollection(cid, label) {
+        if (!page.mgr)
+            return
+        var res = page.mgr.deleteCollection(cid)
+        if (res && res.ok) {
+            if (page.groupKey === "c:" + cid)
+                page.selectGroup("all")
+        }
+    }
+
+    // 把一批服务器移到某个自建合集（cid 为空 = 移出自建合集）
+    function moveCheckedToCollection(cid) {
+        if (!page.mgr)
+            return
+        var cur = page.checked || {}
+        var picked = []
+        for (var k in cur)
+            if (cur[k]) picked.push(k)
+        if (picked.length === 0) {
+            page.bulkError = "没有选中服务器"
+            return
+        }
+        var res = page.mgr.moveToCollection(picked, String(cid || ""))
+        if (res && res.ok) {
+            page.exitSelect()
+            page.moveMenuOpen = false
+        } else {
+            page.bulkError = (res && res.error) || "移动失败"
+        }
+    }
+
+    property bool moveMenuOpen: false
+
+    // 右键自建合集 → 小菜单（改名 / 删除）
+    property string colMenuCid: ""
+    property string colMenuLabel: ""
+    property bool colMenuOpen: false
+
+    function openCollectionMenu(g) {
+        if (!g || g.kind !== "custom")
+            return
+        page.colMenuCid = String(g.collectionId || "")
+        page.colMenuLabel = String(g.label || "")
+        page.colMenuOpen = true
+    }
+
+    // 多选模式下「更多」里用：把勾中的服务器转到某个合集
+    function openMoveMenu() {
+        var cur = page.checked || {}
+        var n = 0
+        for (var k in cur) if (cur[k]) n++
+        if (n === 0) {
+            page.bulkError = "没有选中服务器"
+            return
+        }
+        page.bulkError = ""
+        page.moveMenuOpen = true
     }
 
     function openAddDialog(row) {
@@ -2299,11 +2449,7 @@ Item {
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
                             checked: page.scanChecked[modelData.addr] === true
-                            onToggled: {
-                                var sel = page.scanChecked;
-                                sel[modelData.addr] = checked;
-                                page.scanChecked = sel;
-                            }
+                            onToggled: page.toggleScanOne(modelData.addr, checked)
                         }
                         Text {
                             anchors.left: scanCheck.right
@@ -2726,6 +2872,51 @@ Item {
                         bottomPadding: 2
                     }
 
+                    // ── 新建合集 ──
+                    // ★ 放在合集列表**上面**而不是底部：列表长了以后，
+                    //   「新建」要是被挤到看不见的地方，用户会以为没有这功能。
+                    Rectangle {
+                        objectName: "srvNewCollectionBtn"
+                        width: parent.width
+                        height: 26
+                        radius: Theme.radiusXS
+                        color: newMa.containsMouse
+                               ? Qt.rgba(page.accent.r, page.accent.g, page.accent.b, 0.14)
+                               : "transparent"
+                        border.width: 1
+                        border.color: Qt.rgba(page.accent.r, page.accent.g,
+                                              page.accent.b, newMa.containsMouse ? 0.5 : 0.26)
+
+                        Row {
+                            anchors.centerIn: parent
+                            spacing: 4
+                            Text {
+                                text: "\uE710"          // Add
+                                font.family: Theme.iconFont
+                                font.pixelSize: 10
+                                color: page.accent
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Text {
+                                text: "新建合集"
+                                color: page.accent
+                                font.family: Theme.uiFont
+                                font.pixelSize: 10
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                        MouseArea {
+                            id: newMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            ToolTip.visible: containsMouse
+                            ToolTip.text: "建一个自己的合集，之后把服务器转进来"
+                            ToolTip.delay: 500
+                            onClicked: page.openCollectionDialog("", "", "")
+                        }
+                    }
+
                     Repeater {
                         model: page.groupList
                         delegate: Rectangle {
@@ -2785,9 +2976,18 @@ Item {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: page.selectGroup(modelData.key)
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                onClicked: function (mouse) {
+                                    if (mouse.button === Qt.RightButton
+                                            && modelData.kind === "custom") {
+                                        page.openCollectionMenu(modelData)
+                                    } else {
+                                        page.selectGroup(modelData.key)
+                                    }
+                                }
                             }
-                            // 右键 / 悬浮出「改名」：自动识别不准时用户能自己命名
+                            // 悬浮出「改名」：自动识别不准时用户能自己命名；
+                            // 自建合集也能改名（走的是 renameCollection）。
                             MouseArea {
                                 anchors.right: parent.right
                                 anchors.top: parent.top
@@ -2798,7 +2998,8 @@ Item {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 ToolTip.visible: containsMouse
-                                ToolTip.text: "重命名这个合集"
+                                ToolTip.text: modelData.kind === "custom"
+                                              ? "右键可删除这个合集" : "重命名这个合集"
                                 ToolTip.delay: 400
                                 onClicked: page.openRenameGroup(modelData)
                                 Text {
@@ -3146,6 +3347,13 @@ Item {
                     Component.onCompleted: {
                         if (index === 0) {
                             Qt.callLater(function () {
+                                // ★ 延迟执行时这张卡可能已经被销毁了（切合集、
+                                //   筛选、关弹窗都会重建 delegate），这时
+                                //   `page` 或子项已经是 undefined，直接取属性会抛
+                                //   「Value is undefined and could not be converted
+                                //   to an object」，在控制台刷一堆 QML TypeError。
+                                if (!page || !srvCard || !btnRow || !bigInfo)
+                                    return
                                 page.cardGeometry = ({
                                     "cardH": Math.round(srvCard.height),
                                     "cardW": Math.round(srvCard.width),
@@ -3788,6 +3996,18 @@ Item {
                         label: "导出配置"
                         enabledBtn: page.checkedCount() > 0
                         onClicked: page.askExportChecked()
+                    }
+                    // 「转到合集」：把勾中的这几台收进某个自建合集。
+                    // ★ 放在导出和取消之间 —— 它和导出同级，都是「对选中的这批做事」，
+                    //   而「删除」是破坏性操作，留在最右边。
+                    ActionButton {
+                        objectName: "srvSelMoveBtn"
+                        width: 96
+                        height: 30
+                        accent: false
+                        label: "转到合集"
+                        enabledBtn: page.checkedCount() > 0
+                        onClicked: page.openMoveMenu()
                     }
                     ActionButton {
                         width: 76
@@ -4453,7 +4673,9 @@ Item {
             spacing: 10
 
             Text {
-                text: "重命名合集"
+                text: page.renameIsCustom
+                      ? (page.renameCid ? "重命名合集" : "新建合集")
+                      : "重命名合集"
                 color: Theme.text
                 font.family: Theme.uiFont
                 font.pixelSize: 15
@@ -4461,13 +4683,28 @@ Item {
             }
             Text {
                 width: parent.width
-                text: "自动识别不准时，可以自己给这个合集起个名字（" + page.renameHint + "）。"
-                      + "留空并确定 = 恢复自动识别。"
+                text: page.renameIsCustom
+                      ? (page.renameCid
+                         ? "给这个自建合集改个名字（" + page.renameHint + "）。"
+                         : "新建一个合集，之后可以把服务器「转到」里面保存。")
+                      : ("自动识别不准时，可以自己给这个合集起个名字（"
+                         + page.renameHint + "）。留空并确定 = 恢复自动识别。")
                 color: Theme.textMute
                 font.family: Theme.uiFont
                 font.pixelSize: 10
                 wrapMode: Text.WordWrap
                 lineHeight: 1.4
+            }
+
+            // 出错时给一句人话（重名、空名字……），不要静默什么都不发生
+            Text {
+                width: parent.width
+                visible: page.renameError.length > 0
+                text: page.renameError
+                color: Theme.error
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.WordWrap
             }
 
             Rectangle {
@@ -4491,8 +4728,13 @@ Item {
                     selectByMouse: true
                     maximumLength: 24
                     text: page.renameLabel
-                    onTextChanged: page.renameLabel = text
-                    onAccepted: page.applyRename()
+                    onTextChanged: {
+                        page.renameLabel = text
+                        if (page.renameError.length > 0) page.renameError = ""
+                    }
+                    onAccepted: page.renameIsCustom
+                                ? page.applyCollectionDialog()
+                                : page.applyRename()
                     Keys.onEscapePressed: page.renameOpen = false
 
                     Text {
@@ -4522,7 +4764,9 @@ Item {
                     width: 100
                     height: 32
                     label: "确定"
-                    onClicked: page.applyRename()
+                    onClicked: page.renameIsCustom
+                              ? page.applyCollectionDialog()
+                              : page.applyRename()
                 }
             }
         }
@@ -4530,6 +4774,215 @@ Item {
         onOpened: {
             renameInput.forceActiveFocus()
             renameInput.selectAll()
+        }
+    }
+
+    // ------------------------------------------------------------ 转到合集
+    // 多选 → 「转到合集」：列出所有自建合集，点哪个就移进去。
+    // 末尾固定一个「移出自建合集」，把服务器放回自动归类。
+    Popup {
+        id: moveDlg
+        objectName: "srvMoveDlg"
+        visible: page.moveMenuOpen
+        onClosed: page.moveMenuOpen = false
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        anchors.centerIn: Overlay.overlay
+        padding: 18
+        contentWidth: 340
+        contentHeight: moveCol.implicitHeight
+
+        Overlay.modal: Rectangle { color: Qt.rgba(0, 0, 0, 0.55) }
+
+        background: Rectangle {
+            radius: 14
+            color: Theme.panel
+            border.width: 1
+            border.color: Theme.borderHi
+        }
+
+        contentItem: Column {
+            id: moveCol
+            width: 340
+            spacing: 8
+
+            Text {
+                text: "转到合集"
+                color: Theme.text
+                font.family: Theme.uiFont
+                font.pixelSize: 15
+                font.weight: Font.DemiBold
+            }
+            Text {
+                width: parent.width
+                text: "已勾选 " + page.checkedCount() + " 台。选一个合集，这些服务器就归到里面。"
+                color: Theme.textMute
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.WordWrap
+            }
+
+            Repeater {
+                model: page.collectionList
+                delegate: Rectangle {
+                    required property var modelData
+                    width: parent.width
+                    height: 34
+                    radius: Theme.radiusXS
+                    color: mvMa.containsMouse ? Theme.scrim(0.09) : Theme.scrim(0.04)
+                    border.width: 1
+                    border.color: Theme.border
+
+                    Text {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData.label
+                        color: Theme.text
+                        font.family: Theme.uiFont
+                        font.pixelSize: 11
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData.count + " 台"
+                        color: Theme.textMute
+                        font.family: Theme.uiFont
+                        font.pixelSize: 9
+                    }
+                    MouseArea {
+                        id: mvMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: page.moveCheckedToCollection(modelData.id)
+                    }
+                }
+            }
+
+            // 没有自建合集时给一句引导，别让弹窗空着
+            Text {
+                width: parent.width
+                visible: page.collectionList.length === 0
+                text: "还没有自建合集。先在左边「新建合集」建一个，再回来转移。"
+                color: Theme.warn
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.WordWrap
+            }
+
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
+
+            Rectangle {
+                objectName: "srvMoveOutBtn"
+                width: parent.width
+                height: 30
+                radius: Theme.radiusXS
+                color: outMa.containsMouse ? Theme.scrim(0.09) : "transparent"
+                Text {
+                    anchors.centerIn: parent
+                    text: "移出自建合集（回到自动归类）"
+                    color: Theme.textDim
+                    font.family: Theme.uiFont
+                    font.pixelSize: 10
+                }
+                MouseArea {
+                    id: outMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: page.moveCheckedToCollection("")
+                }
+            }
+
+            Row {
+                width: parent.width
+                spacing: 8
+                Item { width: 1; height: 1 }
+                ActionButton {
+                    width: 88
+                    height: 30
+                    accent: false
+                    label: "取消"
+                    onClicked: page.moveMenuOpen = false
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ 自建合集右键菜单
+    Popup {
+        id: colMenu
+        objectName: "srvColMenu"
+        visible: page.colMenuOpen
+        onClosed: page.colMenuOpen = false
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        anchors.centerIn: Overlay.overlay
+        padding: 18
+        contentWidth: 300
+        contentHeight: colMenuCol.implicitHeight
+
+        Overlay.modal: Rectangle { color: Qt.rgba(0, 0, 0, 0.55) }
+
+        background: Rectangle {
+            radius: 14
+            color: Theme.panel
+            border.width: 1
+            border.color: Theme.borderHi
+        }
+
+        contentItem: Column {
+            id: colMenuCol
+            width: 300
+            spacing: 8
+
+            Text {
+                width: parent.width
+                text: "合集「" + page.colMenuLabel + "」"
+                color: Theme.text
+                font.family: Theme.uiFont
+                font.pixelSize: 14
+                font.weight: Font.DemiBold
+                elide: Text.ElideRight
+            }
+            Text {
+                width: parent.width
+                text: "删除合集只是取消归类，里面的服务器不会被删掉。"
+                color: Theme.textMute
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.WordWrap
+            }
+
+            Row {
+                width: parent.width
+                spacing: 8
+                Item { width: 1; height: 1 }
+                ActionButton {
+                    width: 88
+                    height: 30
+                    accent: false
+                    label: "改名"
+                    onClicked: {
+                        var cid = page.colMenuCid
+                        var lbl = page.colMenuLabel
+                        page.colMenuOpen = false
+                        page.openCollectionDialog(cid, lbl, "")
+                    }
+                }
+                ActionButton {
+                    objectName: "srvColDeleteBtn"
+                    width: 88
+                    height: 30
+                    label: "删除合集"
+                    onClicked: {
+                        page.colMenuOpen = false
+                        page.deleteCollection(page.colMenuCid, page.colMenuLabel)
+                    }
+                }
+            }
         }
     }
 

@@ -91,6 +91,7 @@ DEFAULT_SUITE = [
     "panfix_test",
     "panfix2_test",
     "expire_days_test",
+    "collections_test",
     "translate_test",
     "archive_import_test",
     "round18_test",

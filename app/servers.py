@@ -86,6 +86,22 @@ FRIEND_GROUP_LABEL = "好友在玩"
 # 好友状态多久刷新一次（秒）。太频繁没必要，Steam 那边状态也变得不快。
 FRIEND_REFRESH_SEC = 90
 
+# ---- 用户自建合集 ----
+# 和「自动合集」（按名字前缀 / 同 IP 推断）并存：
+#   · 自动合集是**算**出来的，成员一变就重组；
+#   · 自建合集是**存**下来的，用户说了算，谁进去谁出来都由用户决定。
+# 存进 config 的形状（`server_collections`）：
+#     [{"id": "c1a2b3", "label": "我的常用服", "addrs": ["1.2.3.4:27015", ...]}]
+#
+# ★ 为什么自建合集用独立字段而不是塞进 `server_group_names`：
+#   那个字段是 `{addr: 组名}`，语义是「给**自动**合集改个名」，
+#   一台服务器只能属于一个自动合集。而用户要的是「我把这几台归到一起」——
+#   这件事和自动识别是两套逻辑，混在一起会互相打架
+#   （比如同一台服务器被自动分到「天域」、又被用户放进「我的常用服」）。
+COLLECTION_KEY_PREFIX = "c:"
+COLLECTION_MAX = 60          # 合集数量上限，防止界面被撑爆
+COLLECTION_LABEL_MAX = 24
+
 _INFO_REQ = b"\xff\xff\xff\xff\x54Source Engine Query\x00"
 _PLAYERS_REQ = b"\xff\xff\xff\xff\x55\xff\xff\xff\xff"
 
@@ -490,6 +506,74 @@ def group_servers(rows: list, overrides: dict | None = None) -> list:
 
     out.sort(key=lambda g: (-g["count"], g["label"]))
     return out
+
+
+def apply_collections(groups: list, rows: list,
+                      collections: list | None = None) -> list:
+    """把**用户自建合集**并进自动合集的结果里。
+
+    ★ 为什么是「并进」而不是「替换」：
+      用户明确要的是「能转到某某合集里面保存，还可以自己新建合集」——
+      自建是**追加**一种归类方式，不是把自动识别的结果推翻。
+      所以：
+
+        · 自建合集整条出现在选择器里（哪怕只有 1 台，用户建的就是它的意思）；
+        · 已经被收进自建合集的服务器，**不再重复出现在自动合集里** ——
+          否则同一台服务器在两个合集下都能看到，勾选/删除会让人犯迷糊；
+        · 没收进任何自建合集的，继续按自动规则归类；
+        · 自动合集被搬空了就不显示（成员都跑去自建合集了）。
+
+    ``collections`` 形如 ``[{"id", "label", "addrs"}]``。
+    返回的每项多一个 ``kind="custom"`` 和 ``collectionId``，界面据此画不同图标。
+    """
+    groups = list(groups or [])
+    cols = collections or []
+    if not cols:
+        return groups
+
+    known = {str(r.get("addr") or "") for r in (rows or [])}
+    claimed: set[str] = set()
+    custom: list[dict] = []
+    for c in cols:
+        cid = str(c.get("id") or "").strip()
+        label = str(c.get("label") or "").strip()
+        if not cid or not label:
+            continue
+        # 只留下**列表里真实存在**的地址：用户可能把服务器删了，
+        # 合集里残留的幽灵地址不该让 count 变成假的。
+        addrs = [str(a) for a in (c.get("addrs") or []) if str(a) in known]
+        claimed.update(addrs)
+        custom.append({
+            "key": COLLECTION_KEY_PREFIX + cid,
+            "label": label,
+            "kind": "custom",
+            "collectionId": cid,
+            "count": len(addrs),
+            "addrs": addrs,
+            "host": "",
+        })
+
+    # 自动合集里剔掉已经被自建合集收走的地址
+    trimmed: list[dict] = []
+    for g in groups:
+        left = [a for a in (g.get("addrs") or []) if str(a) not in claimed]
+        if not left:
+            continue
+        if len(left) != len(g.get("addrs") or []):
+            # 成员被搬走了一部分。
+            # ★ 只剩 1 台时**整组撤掉**，让它回到「未分类」：
+            #   自动合集的成立条件是「至少 2 台同名前缀 / 同 IP」，
+            #   被搬走一半后这个前提已经不成立了，还留着「天域 1 台」
+            #   会和「未分类」的定义自相矛盾（用户看到同一类东西被拆到两处）。
+            if len(left) < 2:
+                continue
+            g = dict(g)
+            g["addrs"] = left
+            g["count"] = len(left)
+        trimmed.append(g)
+
+    custom.sort(key=lambda g: natural_sort_key(g["label"]))
+    return custom + trimmed
 
 
 # ---------------------------------------------------------------------------
@@ -1548,6 +1632,172 @@ class ServerManager(QObject):
     def sortMode(self) -> str:
         return self._sort
 
+    # -------------------------------------------------------------- 自建合集
+    def _collections(self) -> list[dict]:
+        """读用户自建的合集（过滤掉形状不对的脏数据）。
+
+        ★ 为什么用 try/except 而不是 `self.config["..."]` 直接取：
+          `Config.__getitem__` 会回退到 DEFAULT_CONFIG，所以正常情况是安全的；
+          但**测试里的桩 config 是普通 dict**，`friends_test` 就因此抛过
+          KeyError，把 `groups` 整个炸掉（表现成服务器页白屏）。
+          这里对「键不存在」宽容一点：没有就是没有自建合集。
+        """
+        try:
+            raw = self.config["server_collections"]
+        except (KeyError, TypeError):
+            return []
+        if not isinstance(raw, list):
+            return []
+        out: list[dict] = []
+        seen: set[str] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("id") or "").strip()
+            label = str(item.get("label") or "").strip()[:COLLECTION_LABEL_MAX]
+            if not cid or not label or cid in seen:
+                continue
+            seen.add(cid)
+            addrs: list[str] = []
+            for a in (item.get("addrs") or []):
+                s = str(a or "").strip()
+                if s and s not in addrs:
+                    addrs.append(s)
+            out.append({"id": cid, "label": label, "addrs": addrs})
+        return out
+
+    def _save_collections(self, cols: list[dict]) -> None:
+        self.config["server_collections"] = cols
+        self.config.save()
+        self.serversChanged.emit()
+
+    @staticmethod
+    def _new_collection_id(cols: list[dict]) -> str:
+        """造一个不和现有撞车的短 id（存进 key 里，所以只要稳定唯一即可）。"""
+        existing = {str(c.get("id") or "") for c in cols}
+        import secrets
+        for _ in range(50):
+            cid = secrets.token_hex(4)
+            if cid not in existing:
+                return cid
+        return str(len(existing) + 1)
+
+    @Property("QVariantList", notify=serversChanged)
+    def collections(self) -> list:
+        """给界面用的自建合集列表（带每台的实时状态，便于预览）。"""
+        rows = {str(r.get("addr") or ""): r for r in self._merged()}
+        out: list[dict] = []
+        for c in self._collections():
+            live = [rows[a] for a in c["addrs"] if a in rows]
+            out.append({
+                "id": c["id"],
+                "key": COLLECTION_KEY_PREFIX + c["id"],
+                "label": c["label"],
+                "count": len(live),
+                "online": sum(1 for r in live if r.get("state") == "online"),
+                "addrs": [str(r.get("addr") or "") for r in live],
+            })
+        return out
+
+    @Slot(str, result="QVariantMap")
+    def createCollection(self, label: str) -> dict:
+        """新建一个空合集。"""
+        name = str(label or "").strip()[:COLLECTION_LABEL_MAX]
+        if not name:
+            return {"ok": False, "error": "合集名不能为空"}
+        cols = self._collections()
+        if len(cols) >= COLLECTION_MAX:
+            return {"ok": False, "error": f"最多 {COLLECTION_MAX} 个合集"}
+        # 同名不让建：界面上两个「我的常用服」根本分不清谁是谁
+        if any(c["label"] == name for c in cols):
+            return {"ok": False, "error": f"已经有叫「{name}」的合集了"}
+        cid = self._new_collection_id(cols)
+        cols.append({"id": cid, "label": name, "addrs": []})
+        self._save_collections(cols)
+        self._set_status(f"已新建合集「{name}」")
+        self._toast(f"已新建合集「{name}」", "ok")
+        return {"ok": True, "id": cid, "key": COLLECTION_KEY_PREFIX + cid,
+                "label": name, "error": ""}
+
+    @Slot(str, str, result="QVariantMap")
+    def renameCollection(self, collection_id: str, label: str) -> dict:
+        name = str(label or "").strip()[:COLLECTION_LABEL_MAX]
+        if not name:
+            return {"ok": False, "error": "合集名不能为空"}
+        cols = self._collections()
+        cid = str(collection_id or "").strip()
+        target = next((c for c in cols if c["id"] == cid), None)
+        if target is None:
+            return {"ok": False, "error": "找不到这个合集"}
+        if any(c["label"] == name and c["id"] != cid for c in cols):
+            return {"ok": False, "error": f"已经有叫「{name}」的合集了"}
+        old = target["label"]
+        target["label"] = name
+        self._save_collections(cols)
+        self._set_status(f"合集「{old}」已改名为「{name}」")
+        self._toast(f"已改名为「{name}」", "ok")
+        return {"ok": True, "label": name, "error": ""}
+
+    @Slot(str, result="QVariantMap")
+    def deleteCollection(self, collection_id: str) -> dict:
+        """删合集（**只删归类，不删服务器**）。
+
+        ★ 这一点必须明确：用户点「删除合集」时多半只是想拆掉这个分组，
+          里面的服务器还得留着。所以这里只把合集条目去掉。
+        """
+        cols = self._collections()
+        cid = str(collection_id or "").strip()
+        target = next((c for c in cols if c["id"] == cid), None)
+        if target is None:
+            return {"ok": False, "error": "找不到这个合集"}
+        cols = [c for c in cols if c["id"] != cid]
+        self._save_collections(cols)
+        msg = f"已删除合集「{target['label']}」（服务器还在，只是不再归类）"
+        self._set_status(msg)
+        self._toast(msg, "info")
+        return {"ok": True, "label": target["label"], "error": ""}
+
+    @Slot("QVariantList", str, result="QVariantMap")
+    def moveToCollection(self, addrs: list, collection_id: str) -> dict:
+        """把服务器**转移**到某个自建合集里。
+
+        `collection_id` 为空串 = 移出所有自建合集（回到自动归类）。
+        ★ 「转移」的语义：从**其它**自建合集里摘掉，再放进目标合集。
+          一台服务器同时出现在两个自建合集里没有意义，只会让人重复操作。
+        """
+        picked = []
+        for a in (addrs or []):
+            s = str(a or "").strip()
+            if s and s not in picked:
+                picked.append(s)
+        if not picked:
+            return {"ok": False, "error": "没有选中服务器"}
+
+        cols = self._collections()
+        cid = str(collection_id or "").strip()
+        target = None
+        if cid:
+            target = next((c for c in cols if c["id"] == cid), None)
+            if target is None:
+                return {"ok": False, "error": "找不到这个合集"}
+
+        # 先从所有合集里摘掉（含目标，去重靠这一步）
+        for c in cols:
+            c["addrs"] = [a for a in c["addrs"] if a not in picked]
+        if target is not None:
+            target["addrs"] = list(target["addrs"]) + picked
+
+        # 空合集不自动删：用户可能是先建好、再慢慢往里挪
+        self._save_collections(cols)
+        if target is not None:
+            msg = f"已把 {len(picked)} 台移到「{target['label']}」"
+        else:
+            msg = f"已把 {len(picked)} 台移出自建合集（回到自动归类）"
+        self._set_status(msg)
+        self._toast(msg, "ok")
+        return {"ok": True, "count": len(picked),
+                "collectionId": cid, "error": ""}
+
     # -------------------------------------------------------------- 合集名手动覆盖
     def _group_overrides(self) -> dict:
         """读「手动改过的合集名」：``{addr: 组名}``。"""
@@ -1609,7 +1859,11 @@ class ServerManager(QObject):
         这样选择器里永远是「全部 / 未分类 / 各合集」，用户不用猜。
         """
         rows = self._merged()
-        groups = group_servers(rows, self._group_overrides())
+        auto = group_servers(rows, self._group_overrides())
+        # ★ 自建合集并进来：已经被用户收进自建合集的服务器，
+        #   不再同时出现在自动合集里（否则同一台在两个合集下都有，
+        #   勾选/删除时会让人犯迷糊）。
+        groups = apply_collections(auto, rows, self._collections())
         in_group: set[str] = set()
         for g in groups:
             in_group.update(g.get("addrs") or [])
@@ -1792,7 +2046,16 @@ class ServerManager(QObject):
         if key == FRIEND_GROUP_KEY:
             return [r for r in rows
                     if r.get("fromFriend") or r.get("friendCount")]
-        groups = group_servers(rows, self._group_overrides())
+        # 自建合集：直接按存的地址过滤（不参与自动推断）
+        if key.startswith(COLLECTION_KEY_PREFIX):
+            cid = key[len(COLLECTION_KEY_PREFIX):]
+            col = next((c for c in self._collections() if c["id"] == cid), None)
+            if col is None:
+                return rows
+            wanted = set(col["addrs"])
+            return [r for r in rows if str(r.get("addr") or "") in wanted]
+        groups = apply_collections(group_servers(rows, self._group_overrides()),
+                                   rows, self._collections())
         addrs: list[str] = []
         for g in groups:
             if str(g.get("key") or "") == key:
