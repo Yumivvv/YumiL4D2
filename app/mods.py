@@ -49,7 +49,16 @@ log = Log("mods.log")
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 MOD_EXTS = (".vpk",)
 # 压缩包：用户可以把多个 vpk + 封面打包成 zip 拖进来一次导入
-ARCHIVE_EXTS = (".zip",)
+#
+# ★ 2026-11 扩了 7z / rar / tar 家族：蓝奏云上大量资源是 .7z 和 .rar，
+#   以前只有 .zip 被当成压缩包，拖 .7z 进去会被当普通文件跳过 ——
+#   用户看到的就是「拖进去没反应」。
+#   zip 用标准库（快、准、能拿到准确清单）；其余走 Windows 自带的
+#   `tar.exe`（bsdtar + libarchive，原生认 7z/rar/tar，不用装 7-Zip）。
+ARCHIVE_EXTS = (".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz",
+                ".tgz", ".tbz2", ".txz")
+# 这些交给 bsdtar
+_TAR_EXTS = (".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2", ".txz")
 # 禁用一个 mod 的方式：把 xxx.vpk 改名成 xxx.vpk.disabled，游戏就不会加载它。
 DISABLED_SUFFIX = ".vpk.disabled"
 WORKSHOP_API = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
@@ -915,16 +924,100 @@ def scan_mods(addons_dir: str) -> dict:
 # ===========================================================================
 # 操作：导入 / 删除 / 启用 / 移植
 # ===========================================================================
+def _archive_member_names(archive_path: str) -> tuple[list[str], str]:
+    """列出压缩包里的成员名（不解压）。返回 `(名字列表, 错误)`。
+
+    zip 走标准库；7z / rar / tar 家族走 Windows 自带的 `tar.exe`
+    （bsdtar + libarchive，原生认这些格式，不用装 7-Zip / WinRAR）。
+    """
+    low = str(archive_path or "").lower()
+    if low.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                return [n for n in zf.namelist() if not n.endswith("/")], ""
+        except (zipfile.BadZipFile, OSError) as e:
+            return [], f"压缩包打不开：{e}"
+    tar = shutil.which("tar")
+    if not tar:
+        return [], "系统没有可用的解压工具（缺 tar.exe）"
+    try:
+        out = subprocess.run(
+            [tar, "-t", "-f", archive_path],
+            capture_output=True, timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return [], f"列目录失败：{e}"
+    if out.returncode != 0:
+        msg = (out.stderr or b"").decode("utf-8", "replace").strip()
+        return [], f"认不出这个压缩包格式（{msg[:80]}）"
+    names = []
+    for raw in (out.stdout or b"").decode("utf-8", "replace").splitlines():
+        n = raw.strip()
+        if n and not n.endswith("/"):
+            names.append(n.lstrip("./"))
+    return names, ""
+
+
 def _extract_archive(archive_path: str) -> tuple[list[str], list[str], str]:
     """把 zip 解压到临时目录，返回 (vpk 列表, 封面图列表, 临时目录)。
 
     只解压 .vpk 和常见封面图，其余内容（readme、文件夹等）忽略。
     解压出来的文件统一摊平放在临时目录（同名封面因此能和 vpk 配对上），
     导入完成后由调用方清理这个临时目录。
+
+    ★ zip 走标准库逐个成员写盘（顺便防路径穿越）；7z / rar / tar 家族
+      先整包解到 tmp/_raw，再把需要的摊平搬上来 —— bsdtar 没法只挑
+      部分成员稳定工作。
     """
     extracted_vpk: list[str] = []
     extracted_img: list[str] = []
     tmp = tempfile.mkdtemp(prefix="l4d2_archive_")
+    low = str(archive_path or "").lower()
+
+    if not low.endswith(".zip"):
+        raw_dir = os.path.join(tmp, "_raw")
+        os.makedirs(raw_dir, exist_ok=True)
+        tar = shutil.which("tar")
+        if not tar:
+            shutil.rmtree(tmp, ignore_errors=True)
+            log(f"no tar.exe for {archive_path}")
+            return [], [], ""
+        try:
+            out = subprocess.run(
+                [tar, "-x", "-f", archive_path, "-C", raw_dir],
+                capture_output=True, timeout=600,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if out.returncode != 0:
+                msg = (out.stderr or b"").decode("utf-8", "replace").strip()
+                log(f"extract {archive_path} failed: {msg[:120]}")
+                shutil.rmtree(tmp, ignore_errors=True)
+                return [], [], ""
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"extract {archive_path} failed: {e!r}")
+            shutil.rmtree(tmp, ignore_errors=True)
+            return [], [], ""
+        for dirpath, _dirs, names in os.walk(raw_dir):
+            for name in names:
+                nl = name.lower()
+                if not (nl.endswith(".vpk") or nl.endswith(IMAGE_EXTS)):
+                    continue
+                target = os.path.join(tmp, name)
+                if os.path.exists(target):
+                    continue
+                try:
+                    shutil.copyfile(os.path.join(dirpath, name), target)
+                except OSError as e:
+                    log(f"flatten {name} failed: {e!r}")
+                    continue
+                if nl.endswith(".vpk"):
+                    extracted_vpk.append(target)
+                else:
+                    extracted_img.append(target)
+        shutil.rmtree(raw_dir, ignore_errors=True)
+        return extracted_vpk, extracted_img, tmp
+
     try:
         with zipfile.ZipFile(archive_path, "r") as zf:
             for info in zf.infolist():
@@ -932,12 +1025,12 @@ def _extract_archive(archive_path: str) -> tuple[list[str], list[str], str]:
                 # 跳过目录
                 if name.endswith("/"):
                     continue
-                low = name.lower()
+                lc = name.lower()
                 base = os.path.basename(name)
                 # 只关心 vpk 和封面图
-                if low.endswith(".vpk"):
+                if lc.endswith(".vpk"):
                     target = os.path.join(tmp, base)
-                elif low.endswith(IMAGE_EXTS):
+                elif lc.endswith(IMAGE_EXTS):
                     target = os.path.join(tmp, base)
                 else:
                     continue
@@ -953,7 +1046,7 @@ def _extract_archive(archive_path: str) -> tuple[list[str], list[str], str]:
                 except (OSError, zipfile.BadZipFile) as e:
                     log(f"extract {name} failed: {e}")
                     continue
-                if low.endswith(".vpk"):
+                if lc.endswith(".vpk"):
                     extracted_vpk.append(target)
                 else:
                     extracted_img.append(target)
@@ -967,10 +1060,19 @@ def _extract_archive(archive_path: str) -> tuple[list[str], list[str], str]:
 def inspect_import_paths(paths: Iterable[str]) -> dict:
     """只读地「预演」一次导入：返回会导入哪些文件、压缩包里有多少个。
 
-    不真正解压（只读 zip 的中央目录），确认框用它显示「N 个文件」+ 前几个文件名。
+    不真正解压（只读压缩包的目录），确认框用它显示「N 个文件」+ 前几个文件名。
+
+    返回里除了老的 `count/names/archives`，还多一个 `items`：
+    每个文件一条 `{name, kind, archive}`，**顺序 = 勾选框的顺序**，
+    默认全选。界面据此让用户逐条勾掉不要的（用户要的「提示勾选，
+    默认全选」就是这个）。
+
+    ★ `items` 和 `names` 必须**来自同一次扫描**：以前界面只拿到 names，
+      再自己去猜哪个是 .vpk、哪个是封面，一旦压缩包里有同名图就会错位。
     """
     names: list[str] = []
     archives: list[str] = []
+    items: list[dict] = []
 
     for raw in paths:
         p = os.path.abspath(str(raw))
@@ -979,28 +1081,32 @@ def inspect_import_paths(paths: Iterable[str]) -> dict:
         low = p.lower()
         if low.endswith(ARCHIVE_EXTS):
             archives.append(os.path.basename(p))
-            try:
-                with zipfile.ZipFile(p, "r") as zf:
-                    vpks: list[str] = []
-                    imgs: dict[str, str] = {}
-                    for info in zf.infolist():
-                        if info.filename.endswith("/"):
-                            continue
-                        b = os.path.basename(info.filename)
-                        lb = b.lower()
-                        if lb.endswith(".vpk"):
-                            vpks.append(b)
-                        elif lb.endswith(IMAGE_EXTS):
-                            imgs.setdefault(os.path.splitext(b)[0].lower(), b)
-                    for v in vpks:
-                        names.append(v)
-                    # 压缩包里的封面图也会一起导入（同名封面跟着 vpk 走，孤儿图也照导）
-                    for b in imgs.values():
-                        names.append(b)
-            except (zipfile.BadZipFile, OSError) as e:
-                log(f"inspect archive failed {p}: {e!r}")
+            members, err = _archive_member_names(p)
+            if err:
+                log(f"inspect archive failed {p}: {err}")
+                continue
+            vpks: list[str] = []
+            imgs: dict[str, str] = {}
+            for member in members:
+                b = os.path.basename(member)
+                lb = b.lower()
+                if lb.endswith(".vpk"):
+                    vpks.append(b)
+                elif lb.endswith(IMAGE_EXTS):
+                    imgs.setdefault(os.path.splitext(b)[0].lower(), b)
+            for v in vpks:
+                names.append(v)
+                items.append({"name": v, "kind": "mod",
+                              "archive": os.path.basename(p)})
+            # 压缩包里的封面图也会一起导入（同名封面跟着 vpk 走，孤儿图也照导）
+            for b in imgs.values():
+                names.append(b)
+                items.append({"name": b, "kind": "image",
+                              "archive": os.path.basename(p)})
         elif low.endswith(".vpk"):
             names.append(os.path.basename(p))
+            items.append({"name": os.path.basename(p), "kind": "mod",
+                          "archive": ""})
             # 同目录同名封面也会自动带上
             stem = os.path.splitext(os.path.basename(p))[0]
             try:
@@ -1015,29 +1121,49 @@ def inspect_import_paths(paths: Iterable[str]) -> dict:
                 real = entries.get((stem + ext).lower())
                 if real:
                     names.append(real)
+                    items.append({"name": real, "kind": "image",
+                                  "archive": ""})
                     break
         elif low.endswith(IMAGE_EXTS):
             names.append(os.path.basename(p))
+            items.append({"name": os.path.basename(p), "kind": "image",
+                          "archive": ""})
 
     # 去重（保持顺序）
     seen: set[str] = set()
     uniq: list[str] = []
-    for n in names:
+    uniq_items: list[dict] = []
+    for n, it in zip(names, items):
         k = n.lower()
         if k in seen:
             continue
         seen.add(k)
         uniq.append(n)
+        uniq_items.append(it)
 
-    return {"count": len(uniq), "names": uniq, "archives": archives}
+    return {"count": len(uniq), "names": uniq, "archives": archives,
+            "items": uniq_items}
 
 
-def import_files(paths: Iterable[str], addons_dir: str, workshop: WorkshopClient | None = None) -> dict:
+def import_files(paths: Iterable[str], addons_dir: str, workshop: WorkshopClient | None = None,
+                 only: Iterable[str] | None = None) -> dict:
     """把文件（含 zip 压缩包）导入 addons 目录。
 
     压缩包会先解到临时目录（只挑 .vpk 和封面图），走和普通文件完全一样的复制流程，
     结束后临时目录一定删掉。
+
+    `only`：只导入这些文件名（不区分大小写，按 basename 比）。
+      给了它就**严格按勾选来** —— 用户在确认框里取消勾选的东西不该偷偷导入。
+      不给（None）保持原来的「全都导入」行为，兼容所有老调用点。
     """
+    wanted = None
+    if only is not None:
+        wanted = {str(x).strip().lower() for x in only if str(x).strip()}
+        if not wanted:
+            # 用户把所有勾都取消了：什么都不做，别把整包倒进去
+            return {"ok": False, "error": "没有勾选任何文件", "copied": [],
+                    "skipped": [], "locked": [], "errors": []}
+
     tmp_dirs: list[str] = []
     expanded: list[str] = []
     for raw in paths:
@@ -1050,6 +1176,10 @@ def import_files(paths: Iterable[str], addons_dir: str, workshop: WorkshopClient
                 tmp_dirs.append(tmp)
         else:
             expanded.append(raw)
+
+    if wanted is not None:
+        expanded = [p for p in expanded
+                    if os.path.basename(p).lower() in wanted]
 
     try:
         return _import_files_impl(expanded, addons_dir, workshop)

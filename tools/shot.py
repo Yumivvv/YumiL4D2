@@ -12,7 +12,7 @@ from guard import protect_user_data  # noqa: E402
 protect_user_data()
 os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
 
-from PySide6.QtCore import QMetaObject, QObject, Qt, QTimer, QUrl
+from PySide6.QtCore import Q_ARG, QMetaObject, QObject, Qt, QTimer, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 
@@ -224,6 +224,32 @@ def main() -> int:
                 return
         elif MODE == "import":
             win.setProperty("section", 1)
+            wait_ms(600)
+            # 造一个真压缩包（几个 vpk + 同名封面 + 无关截图），
+            # 走 askImport 弹确认框 —— 这张图要能看出「逐条勾选、默认全选」
+            import tempfile, zipfile
+            _tmp = tempfile.mkdtemp(prefix="l4d2_shot_imp_")
+            _zp = os.path.join(_tmp, "一堆MOD.zip")
+            try:
+                with zipfile.ZipFile(_zp, "w") as _zf:
+                    _zf.writestr("mods/123456789.vpk", b"V" * 2048)
+                    _zf.writestr("mods/123456789.jpg", b"I" * 512)
+                    _zf.writestr("mods/987654321.vpk", b"V" * 2048)
+                    _zf.writestr("mods/987654321.png", b"I" * 512)
+                    _zf.writestr("mods/555555555.vpk", b"V" * 2048)
+                    _zf.writestr("screenshots/preview.png", b"I" * 512)
+            except OSError as e:
+                log("make zip failed:", e)
+            wait_ms(1200)
+            _panel = win.findChild(QObject, "modPanelRoot")
+            _ok = False
+            if _panel is not None:
+                _ok = QMetaObject.invokeMethod(_panel, "askImport",
+                                               Q_ARG("QVariant", [_zp]))
+            log("  askImport ->", _ok, "panel =", _panel is not None)
+            wait_ms(1200)
+            _dlg = win.findChild(QObject, "importConfirmDlg")
+            log("  dialog opened =", _dlg.property("opened") if _dlg else None)
             log("import dialog preview")
         elif MODE == "toast":
             # 动作提示浮层：一次弹三种级别，看颜色对不对
@@ -630,7 +656,7 @@ def main() -> int:
                 win.openDetail(items[0]["bvid"])
                 wait_ms(800)
         # 有 Popup 的模式要连 overlay 一起抓，frame.grabToImage 抓不到弹窗
-        if MODE in ("servers-add", "servers-direct"):
+        if MODE in ("servers-add", "servers-direct", "import"):
             win.grabWindowShot(OUT)
         else:
             win.grabPreview(OUT)

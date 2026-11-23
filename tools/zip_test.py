@@ -145,22 +145,31 @@ def main():
 
     expr(f"askImport([{QUrl.fromLocalFile(zp).toString()!r}])")
     count = expr("pendingImportCount()")
-    names = expr("previewImportNames()")
-    if hasattr(names, "toVariant"):
-        names = names.toVariant()
-    names = list(names or [])
+    # ★ 2026-11 改版：确认框从「只读预览前 5 个」换成了**逐条勾选的清单**
+    #   （默认全选）。所以这里不再看 previewImportNames()（它已经删了），
+    #   改看 importPickItems()（真实清单）和 importPickCount()（默认全选数）。
+    picks = expr("importPickItems()")
+    if hasattr(picks, "toVariant"):
+        picks = picks.toVariant()
+    picks = list(picks or [])
+    picked_n = expr("importPickCount()")
     info = expr("pendingImportInfo")
     if hasattr(info, "toVariant"):
         info = info.toVariant()
     log(f"确认框 count = {count}")
-    log(f"预览文件名 = {list(names)}")
+    log(f"勾选清单条数 = {len(picks)} 已勾选 = {picked_n}")
     log(f"压缩包 = {info.get('archives') if isinstance(info, dict) else info}")
 
     ok_count = count == 7  # 6 vpk + 1 同名封面（readme.txt 不算）
-    ok_preview = len(list(names)) == 5
+    # 清单里每个该导入的文件都在，而且**默认全选**
+    ok_pick = len(picks) == 7 and int(picked_n or 0) == 7
+    # 每条都标了 MOD / 封面，用户能分清哪个是本体
+    ok_kind = all(isinstance(p, dict) and p.get("kind") in ("mod", "image")
+                  for p in picks) if picks else False
     ok_archive = bool(info.get("archives")) if isinstance(info, dict) else False
     log(f"count 断言(应为7) = {ok_count}")
-    log(f"预览最多5个断言 = {ok_preview}")
+    log(f"清单 7 条且默认全选 = {ok_pick}")
+    log(f"每条都标了 MOD/封面 = {ok_kind}")
     log(f"显示压缩包名断言 = {ok_archive}")
 
     expr("doImport()")
@@ -176,7 +185,7 @@ def main():
     core.shutdown()
     shutil.rmtree(tmp, ignore_errors=True)
 
-    passed = all([ok_count, ok_preview, ok_archive, ok_import, not left])
+    passed = all([ok_count, ok_pick, ok_kind, ok_archive, ok_import, not left])
     log("全部通过" if passed else "有失败项")
     # 日志写到临时目录，不要把测试产物丢进用户的 data/
     with open(os.path.join(tempfile.gettempdir(), "l4d2_zip_test.log"), "w",

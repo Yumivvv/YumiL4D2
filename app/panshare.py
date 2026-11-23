@@ -94,14 +94,29 @@ QUARK_TOKEN_APIS = (
     "https://drive.quark.cn/1/clouddrive/share/sharepage/token",
 )
 # 夸克明确表示「分享没了」的 code（拿不到元信息时才用得上）
-QUARK_GONE_CODES = {41004, 41005, 41006, 41007, 41009}
+QUARK_GONE_CODES = {41004, 41005, 41006, 41007, 41009,
+                    # ★ 41019 = 「分享地址已过期」。实测一个已过期的夸克分享，
+                    #   token 接口返回 **HTTP 404** + `{"status":404,
+                    #   "code":41019,"message":"分享地址已过期"}`，**没有 data**。
+                    #   之前的实现只认「带 data 的响应」，这条直接被丢掉，
+                    #   最后报成 unknown（界面什么都不显示）—— 用户看到的
+                    #   就是「明明过期了却没有任何提示」。
+                    41019,
+                    # 41022/41023 是同类「地址失效」的近亲，一并归到「没了」
+                    41022, 41023}
 QUARK_GONE_TEXT = {
     41004: "分享不存在或已被取消",
     41005: "分享不存在或已被取消",
     41006: "分享已过期",
     41007: "分享已失效",
     41009: "分享不存在或已被取消",
+    41019: "分享已过期",
+    41022: "分享已被取消",
+    41023: "分享已失效",
 }
+# 夸克 token 接口在「分享已过期/已取消」时用的 HTTP 状态码：404。
+# ★ 除了 200，**404 也必须读 body**：过期信息只在 body 的 code 里。
+_QUARK_BODY_STATUS = (200, 404)
 
 # 缓存：{url: (时间戳, 结果dict)}
 _CACHE: dict[str, tuple[float, dict]] = {}
@@ -117,6 +132,13 @@ _ERRNO = {
     2: "分享不存在或已被取消",
     -62: "分享不存在或已被取消",
     -7: "提取码错误",
+    # ★ -21 = 「分享已过期」。实测一个过期分享：
+    #     GET /api/shorturlinfo?shorturl=<surl>
+    #     → {"errno": -21, ...} 且 **没有 expiretimestamp / expired_type**
+    #   以前没映射这个 code，落到兜底的「分享打不开（可能已被取消）」——
+    #   过期和「被取消」在界面上是两种角标（已过期 / 已失效），
+    #   混成一句会让用户以为是作者删了，其实只是到期了。
+    -21: "分享已过期（已超过有效期）",
     -9 - 1: "",                   # 占位，避免 -10 被误判
 }
 
@@ -232,9 +254,16 @@ def _check_baidu(url: str, now: float, timeout: float) -> dict:
 
     errno = int(js.get("errno") or 0)
     if errno != -9:
+        # ★ -21 是「已过期」，要报 expired（界面显示「已过期」角标）；
+        #   其余（2 / -62 …）才是「分享没了」→ gone（显示「已失效」）。
+        #   两者在界面上是两个不同的角标，别混。
+        if errno == -21:
+            return {"ok": True, "state": "expired",
+                    "text": _ERRNO.get(-21, "分享已过期"),
+                    "expireAt": 0, "expireDays": 0, "expired": True}
         msg = _ERRNO.get(errno) or "分享打不开（可能已被取消）"
         return {"ok": True, "state": "gone", "text": msg, "expireAt": 0,
-                "expireDays": 0}
+                "expireDays": 0, "expired": True}
     return _judge(int(js.get("expiretimestamp") or 0), now)
 
 
@@ -275,6 +304,7 @@ def _check_quark(url: str, now: float, timeout: float,
         "Origin": "https://pan.quark.cn",
     }
     js = None
+    code_seen = 0
     for api in QUARK_TOKEN_APIS:
         try:
             resp = NC.post(api, json={"pwd_id": surl,
@@ -282,7 +312,11 @@ def _check_quark(url: str, now: float, timeout: float,
                            params={"pr": "ucpro", "fr": "pc"},
                            headers=headers,
                            timeout=(4, max(5.0, float(timeout))))
-            if int(getattr(resp, "status_code", 0) or 0) != 200:
+            status = int(getattr(resp, "status_code", 0) or 0)
+            # ★ 404 也要读 body：**「已过期」只体现在 body 的 code 里**，
+            #   HTTP 状态一起是 404。以前这里 `!= 200 → continue`，
+            #   过期信息就这么被丢了，用户界面上什么都不显示。
+            if status not in _QUARK_BODY_STATUS:
                 continue
             body = resp.json()
         except Exception as e:  # noqa: BLE001
@@ -293,8 +327,24 @@ def _check_quark(url: str, now: float, timeout: float,
         if isinstance(body, dict) and isinstance(body.get("data"), dict):
             js = body
             break
+        # 没有 data（典型就是 41019 过期）：记下 code，交给下面统一判断
+        if isinstance(body, dict):
+            try:
+                c = int(body.get("code") or 0)
+            except (TypeError, ValueError):
+                c = 0
+            if c:
+                code_seen = c
+            if c in QUARK_GONE_CODES:
+                return {"ok": True, "state": "expired",
+                        "text": QUARK_GONE_TEXT.get(c, "分享已过期"),
+                        "expireAt": 0, "expireDays": 0, "expired": True}
 
     if not js:
+        if code_seen in QUARK_GONE_CODES:
+            return {"ok": True, "state": "expired",
+                    "text": QUARK_GONE_TEXT.get(code_seen, "分享已过期"),
+                    "expireAt": 0, "expireDays": 0, "expired": True}
         return _unknown()
 
     data = js["data"]

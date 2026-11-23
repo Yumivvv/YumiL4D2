@@ -61,6 +61,18 @@ _time = time
 log = Log("mods_ui.log")
 
 FAV_PATH = os.path.join(DATA_DIR, "favorites.json")
+# 用户手动指定的分类（覆盖自动推断的结果）。
+# 形状：{"w3115675033": "weapon", "smy-mod": "map"}
+# ★ 键用和收藏完全相同的 fav_key（工坊 ID 优先、否则文件名 stem），
+#   不能用完整路径：启用/禁用会改扩展名，路径跟着变，覆盖就丢了。
+CATEGORY_OVERRIDE_PATH = os.path.join(DATA_DIR, "modcategories.json")
+# 自定义分类名（用户可以自己起，比如「二次元人物」「我常用的」）。
+# 存 [{key, label}]，key 是 `u_xxxxx` 这种内部标识，改名字不影响已归类的 MOD。
+CUSTOM_CATEGORY_KEY = "mod_custom_categories"
+# 自定义分类的 key 前缀：和内置分类（weapon/map/…）区分开，
+# 这样内置分类表改动时不会撞车。
+CUSTOM_CAT_PREFIX = "u_"
+CUSTOM_CAT_LABEL_MAX = 20
 
 
 def _file_url(path: str) -> str:
@@ -84,6 +96,7 @@ class ModListModel(QAbstractListModel):
         "selectable", "checked", "isLocal",
         # 卡片/详情用的扩展字段
         "category", "categoryLabel", "content", "favorited", "tags",
+        "categoryManual", "categoryAuto", "categoryAutoLabel", "catKey",
         "viewsText", "subsText", "createdText", "dirText", "selected",
         "hasUpdate", "updateText", "updatedText",
     ]
@@ -226,6 +239,11 @@ class ModManager(QObject):
         self._closing = False    # 退出时置 True，后台线程不再碰模型
         self._selected_path = ""
         self._favorites: set[str] = self._load_favorites()
+        # 用户手动指定的分类（key = fav_key，value = 分类 key）。
+        # 扫盘时在 _decorate 里覆盖自动推断的结果，见 _decorate_category()。
+        self._category_overrides: dict = self._load_category_overrides()
+        # 用户自建分类（侧边栏多出来的那几栏）
+        self._custom_categories: list = []
         self._all_local: list[dict] = []
         self._all_workshop: list[dict] = []
         # 勾选状态的持久存储（按 path 的 normcase 记），独立于模型重建。
@@ -235,6 +253,9 @@ class ModManager(QObject):
         self._checked_paths: set[str] = set()
         # 删除方式：True=回收站（默认） False=直接删
         self._cfg = Config()
+        # 用户自建分类（侧边栏多出来的那几栏）。必须等 _cfg 有了才能读，
+        # 所以放在这里而不是上面和 _favorites 一起初始化。
+        self._custom_categories = self._load_custom_categories()
         # ---- 筛选 / 排序要跨重启记住（用户报的）----
         # 以前这些状态只活在内存里：关掉软件再开，好不容易调好的
         # 「只看本地 + 最近导入」又回到默认，每次都得重设一遍。
@@ -362,6 +383,65 @@ class ModManager(QObject):
         except OSError:
             pass
 
+    # ==================================================== 分类覆盖（用户手动指定）
+    #
+    # ★ 为什么需要「覆盖」而不是改推断规则：
+    #   自动分类是靠 tag + 标题关键词 + VPK 内部路径猜的，本质上一定会错：
+    #     · 作者把武器 mod 写成「Zombie Slayer Rifle」→ 命中 zombie，判成感染者；
+    #     · 「Survivor Weapon Pack」→ tag 里有 Survivors，判成生还者，其实是武器；
+    #     · 工坊 tag 是作者自己勾的，很多作者勾 `Miscellaneous` 或干脆不勾；
+    #     · 本地 MOD 连 tag 都没有，全靠文件名猜。
+    #   与其无限加规则（越加越容易误伤），不如让用户一句话改掉并**记住**。
+    #   自动结果仍然是默认值，用户改过的以用户为准 —— 两者不冲突。
+    def _load_category_overrides(self) -> dict:
+        try:
+            with open(CATEGORY_OVERRIDE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()
+                        if str(k) and str(v)}
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    def _save_category_overrides(self) -> None:
+        try:
+            tmp = CATEGORY_OVERRIDE_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._category_overrides, f, ensure_ascii=False,
+                          indent=2, sort_keys=True)
+            os.replace(tmp, CATEGORY_OVERRIDE_PATH)
+        except OSError as e:
+            log(f"save category overrides failed: {e!r}")
+
+    def _load_custom_categories(self) -> list:
+        """读用户自建分类：[{key,label}]。配置坏了就当没有。"""
+        try:
+            raw = self._cfg[CUSTOM_CATEGORY_KEY]
+        except (KeyError, TypeError):
+            return []
+        if not isinstance(raw, list):
+            return []
+        out = []
+        seen = set()
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("key") or "").strip()
+            label = str(row.get("label") or "").strip()[:CUSTOM_CAT_LABEL_MAX]
+            if not key.startswith(CUSTOM_CAT_PREFIX) or not label or key in seen:
+                continue
+            seen.add(key)
+            out.append({"key": key, "label": label})
+        return out
+
+    def _save_custom_categories(self) -> None:
+        try:
+            self._cfg[CUSTOM_CATEGORY_KEY] = list(self._custom_categories)
+            self._cfg.save()
+        except (OSError, TypeError) as e:     # noqa: BLE001
+            log(f"save custom categories failed: {e!r}")
+
 
     # ================================================================ 属性
     @Property(QObject, constant=True)
@@ -481,9 +561,30 @@ class ModManager(QObject):
             "updatable": upd,
         }
 
+    def _category_label(self, key: str) -> str:
+        """分类 key → 显示名。内置分类查表，自建分类查用户起的名字。
+
+        ★ 必须容错：用户删掉一个自建分类之后，已经归到它下面的 MOD 还在
+          （`modcategories.json` 里的覆盖记录不会跟着删）。那种时候也得显示成
+          人看得懂的东西，不能是空白，也不能把 `u_ab12cd` 这种内部 key 露出来。
+        """
+        k = str(key or "").strip()
+        if not k:
+            return "其他"
+        if k in M.CATEGORY_LABELS:
+            return M.CATEGORY_LABELS[k]
+        for row in getattr(self, "_custom_categories", []):
+            if str(row.get("key") or "") == k:
+                return str(row.get("label") or k)
+        return "其他"
+
     @Property("QVariantList", notify=modsChanged)
     def categoryCounts(self) -> list:
-        """侧边栏「分类」：返回 [{key,label,count}]，只保留有内容的分类。"""
+        """侧边栏「分类」：返回 [{key,label,count}]，只保留有内容的分类。
+
+        ★ 顺序 = 内置分类在前（按 CATEGORY_DEFS），用户自建分类接在后面。
+          「其他」总在最后 —— 它是兜底，排中间会让列表看着很乱。
+        """
         items = self._all_local + self._all_workshop
         tally: dict[str, int] = {}
         for m in items:
@@ -494,6 +595,13 @@ class ModManager(QObject):
             n = tally.get(key, 0)
             if n:
                 out.append({"key": key, "label": label, "count": n})
+        for row in getattr(self, "_custom_categories", []):
+            key = str(row.get("key") or "")
+            n = tally.get(key, 0)
+            if key and n:
+                out.append({"key": key,
+                            "label": str(row.get("label") or key),
+                            "count": n})
         return out
 
     @Property(int, notify=modsChanged)
@@ -680,6 +788,17 @@ class ModManager(QObject):
             elif (vpk or {}).get("hasWeapon"):
                 category = "weapon"
 
+        # ★ 用户手动指定过分类的，**以用户为准**（覆盖上面所有自动推断）。
+        #   自动分类一定会出错：工坊 tag 是作者自己勾的，「Zombie Slayer Rifle」
+        #   这种武器会因为带 zombie 被判成感染者……与其无限加规则越加越误伤，
+        #   不如让用户一句话改掉并记住。这里只读，不写。
+        override_key = self._fav_key({"workshopId": wid, "stem": m.get("stem"),
+                                      "name": m.get("name")})
+        overridden = self._category_overrides.get(override_key) or ""
+        category_auto = category
+        if overridden:
+            category = overridden
+
         # 更新检查：工坊最后更新 > 本地文件修改时间 → 作者改过，本地这份可能是旧的。
         # 留 60 秒余量，避免「刚下完就提示要更新」。
         mtime = int(m.get("mtime") or 0)
@@ -752,7 +871,13 @@ class ModManager(QObject):
             "disabledName": "",
             # ---- 扩展 ----
             "category": category,
-            "categoryLabel": M.CATEGORY_LABELS.get(category, "其他"),
+            "categoryLabel": self._category_label(category),
+            # 用户手动指定过没有（详情面板据此显示「已手动指定 · 恢复自动」）
+            "categoryManual": bool(overridden),
+            # 自动推断出来的那个分类（用户想恢复时给个参考）
+            "categoryAuto": category_auto,
+            "categoryAutoLabel": self._category_label(category_auto),
+            "catKey": override_key,
             "content": M.describe_content(title, desc),
             "favorited": fav_key in self._favorites,
             "favKey": fav_key,
@@ -1503,6 +1628,197 @@ class ModManager(QObject):
         title = target.get("title") or ""
         self._set_status(("已收藏 " if on else "已取消收藏 ") + title)
         self.toast(("已收藏 " if on else "已取消收藏 ") + title, "ok" if on else "info")
+
+    # ================================================== 手动指定分类（覆盖自动判断）
+    @Property("QVariantList", notify=modsChanged)
+    def customCategories(self) -> list:
+        """用户自建的分类（详情面板的「分类」选择器要用）。"""
+        return [dict(x) for x in getattr(self, "_custom_categories", [])]
+
+    @Property("QVariantList", notify=modsChanged)
+    def categoryChoices(self) -> list:
+        """选择器里的完整清单：内置分类 + 自建分类 + 「其他」。
+
+        内置分类即使当前一个 MOD 都没有也要列出来 —— 用户正是要
+        「把这条塞进一个现在空着的分类」。
+        """
+        out = [{"key": k, "label": lab, "custom": False}
+               for k, lab in M.CATEGORY_DEFS]
+        for row in getattr(self, "_custom_categories", []):
+            out.append({"key": str(row.get("key") or ""),
+                        "label": str(row.get("label") or ""),
+                        "custom": True})
+        return out
+
+    def _find_mod(self, path: str) -> dict | None:
+        key = os.path.normcase(path or "")
+        if not key:
+            return None
+        for m in self._all_local + self._all_workshop:
+            if os.path.normcase(m.get("path") or "") == key:
+                return m
+        return None
+
+    def _known_category(self, key: str) -> bool:
+        """这个分类 key 认不认得（内置的、或用户自建的）。"""
+        k = str(key or "")
+        if k in M.CATEGORY_LABELS:
+            return True
+        return any(str(r.get("key") or "") == k
+                   for r in getattr(self, "_custom_categories", []))
+
+    def _apply_category_to(self, mod: dict, key: str) -> None:
+        """把分类写进内存里的那一条（模型和详情面板都读它）。"""
+        mod["category"] = key
+        mod["categoryLabel"] = self._category_label(key)
+
+    @Slot(str, str, result="QVariantMap")
+    def setModCategory(self, path: str, key: str) -> dict:
+        """把某个 MOD 手动归到某个分类，并记住（下次启动仍然生效）。
+
+        ★ 为什么不直接改自动推断的规则：自动分类靠工坊 tag（作者自己勾的）
+          + 标题关键词 + VPK 内部路径猜，一定会出错，而且规则越加越容易
+          误伤别的 MOD。让用户一句话改掉、我们只负责记住，才是对的解法。
+        """
+        mod = self._find_mod(path)
+        if mod is None:
+            return {"ok": False, "error": "找不到这个 MOD"}
+        k = str(key or "").strip()
+        if not self._known_category(k):
+            return {"ok": False, "error": "没有这个分类"}
+        fav = mod.get("catKey") or self._fav_key(mod)
+        self._category_overrides[fav] = k
+        self._save_category_overrides()
+        # 同一个 MOD 可能同时以本地/云端两份存在，一起改
+        for m in self._all_local + self._all_workshop:
+            if (m.get("catKey") or self._fav_key(m)) == fav:
+                self._apply_category_to(m, k)
+                m["categoryManual"] = True
+        self._refresh_selected_flags()
+        self.modsChanged.emit()
+        self.detailChanged.emit()
+        label = self._category_label(k)
+        self._set_status(f"已归类为「{label}」")
+        self.toast(f"已归类为「{label}」", "ok")
+        # 正按别的分类筛着，改完这条就会从当前列表里消失 —— 重筛一次，
+        # 免得用户以为「点了没反应」。
+        self._apply_filter()
+        return {"ok": True, "category": k, "label": label}
+
+    @Slot(str, result="QVariantMap")
+    def clearModCategory(self, path: str) -> dict:
+        """恢复自动判断（删掉这条手动记录）。"""
+        mod = self._find_mod(path)
+        if mod is None:
+            return {"ok": False, "error": "找不到这个 MOD"}
+        fav = mod.get("catKey") or self._fav_key(mod)
+        had = self._category_overrides.pop(fav, None)
+        if had is not None:
+            self._save_category_overrides()
+        for m in self._all_local + self._all_workshop:
+            if (m.get("catKey") or self._fav_key(m)) == fav:
+                auto = m.get("categoryAuto") or "other"
+                self._apply_category_to(m, auto)
+                m["categoryManual"] = False
+        self._refresh_selected_flags()
+        self.modsChanged.emit()
+        self.detailChanged.emit()
+        self._apply_filter()
+        msg = "已恢复自动分类" if had is not None else "这条本来就是自动分类"
+        self._set_status(msg)
+        self.toast(msg, "info")
+        return {"ok": True, "category": (self._find_mod(path) or {}).get("category", "")}
+
+    @Slot(str, result="QVariantMap")
+    def createCategory(self, label: str) -> dict:
+        """新建一个自建分类，返回 {ok, key, label}。
+
+        重名直接复用已有的那个（用户手滑连点两下不该多出两栏空分类）。
+        """
+        name = str(label or "").strip()[:CUSTOM_CAT_LABEL_MAX]
+        if not name:
+            return {"ok": False, "error": "分类名不能为空"}
+        for row in getattr(self, "_custom_categories", []):
+            if str(row.get("label") or "") == name:
+                return {"ok": True, "key": row.get("key"), "label": name,
+                        "existed": True}
+        # key 用序号 + 一小段哈希：序号保证可读，哈希保证删了再建同名不会
+        # 复用到旧的 key（旧 key 上可能还挂着别的 MOD 的覆盖记录）。
+        base = f"{CUSTOM_CAT_PREFIX}{len(self._custom_categories) + 1}"
+        key = base
+        taken = {str(r.get("key") or "") for r in self._custom_categories}
+        n = 1
+        while key in taken:
+            n += 1
+            key = f"{base}_{n}"
+        self._custom_categories.append({"key": key, "label": name})
+        self._save_custom_categories()
+        self.modsChanged.emit()
+        self._set_status(f"已新建分类「{name}」")
+        self.toast(f"已新建分类「{name}」", "ok")
+        return {"ok": True, "key": key, "label": name, "existed": False}
+
+    @Slot(str, str, result="QVariantMap")
+    def renameCategory(self, key: str, label: str) -> dict:
+        """给自建分类改个名字。内置分类不给改（它们有固定含义）。"""
+        k = str(key or "").strip()
+        name = str(label or "").strip()[:CUSTOM_CAT_LABEL_MAX]
+        if not name:
+            return {"ok": False, "error": "分类名不能为空"}
+        if k in M.CATEGORY_LABELS:
+            return {"ok": False, "error": "内置分类不能改名"}
+        for row in getattr(self, "_custom_categories", []):
+            if str(row.get("key") or "") == k:
+                row["label"] = name
+                self._save_custom_categories()
+                # 已经归到这个分类的 MOD 显示名要跟着变
+                for m in self._all_local + self._all_workshop:
+                    if str(m.get("category") or "") == k:
+                        m["categoryLabel"] = name
+                self._refresh_selected_flags()
+                self.modsChanged.emit()
+                self.detailChanged.emit()
+                return {"ok": True, "key": k, "label": name}
+        return {"ok": False, "error": "没有这个分类"}
+
+    @Slot(str, result="QVariantMap")
+    def deleteCategory(self, key: str) -> dict:
+        """删掉一个自建分类。
+
+        ★ 归在它下面的 MOD **不会被删**，而是回到自动分类 ——
+          用户删的是「这一栏」，不是「这些 MOD」。同理，正筛着这个分类时
+          要把筛选清掉，否则列表会空着而用户不知道能点哪里退出。
+        """
+        k = str(key or "").strip()
+        if k in M.CATEGORY_LABELS:
+            return {"ok": False, "error": "内置分类不能删除"}
+        before = len(self._custom_categories)
+        self._custom_categories = [r for r in self._custom_categories
+                                   if str(r.get("key") or "") != k]
+        if len(self._custom_categories) == before:
+            return {"ok": False, "error": "没有这个分类"}
+        self._save_custom_categories()
+        # 挂在这个分类上的手动记录全部作废 → 回到自动分类
+        dropped = [fav for fav, v in self._category_overrides.items() if v == k]
+        for fav in dropped:
+            self._category_overrides.pop(fav, None)
+        if dropped:
+            self._save_category_overrides()
+        for m in self._all_local + self._all_workshop:
+            fav = m.get("catKey") or self._fav_key(m)
+            if fav in dropped:
+                self._apply_category_to(m, m.get("categoryAuto") or "other")
+                m["categoryManual"] = False
+        if self._category == k:
+            self._category = ""
+            self._remember_filters()
+        self._refresh_selected_flags()
+        self.modsChanged.emit()
+        self.detailChanged.emit()
+        self._apply_filter()
+        self._set_status("已删除分类（相关 MOD 回到自动分类）")
+        self.toast("已删除分类", "info")
+        return {"ok": True, "released": len(dropped)}
 
     @Slot(result="QVariantMap")
     def launchGame(self) -> dict:
@@ -2330,24 +2646,45 @@ class ModManager(QObject):
     # ================================================================ 导入
     @Slot("QVariantList", result="QVariantMap")
     def planImport(self, paths: list) -> dict:
-        """导入前预演：压缩包会展开，返回真正会导入的文件数 + 文件名（给确认框显示）。"""
+        """导入前预演：压缩包会展开，返回真正会导入的文件清单（给确认框勾选）。
+
+        返回 `{count, names, archives, items}`；`items` 每项
+        `{name, kind, archive}`，**默认全选**，用户在确认框里勾掉不要的。
+        """
         if not paths:
-            return {"count": 0, "names": [], "archives": []}
+            return {"count": 0, "names": [], "archives": [], "items": []}
         try:
             return M.inspect_import_paths(paths)
         except Exception as e:  # noqa: BLE001  预演失败不能让确认框都打不开
             log(f"plan import failed: {e!r}")
-            return {"count": len(paths), "names": [], "archives": []}
+            return {"count": len(paths), "names": [], "archives": [], "items": []}
 
     @Slot("QVariantList", result="QVariantMap")
     def importFiles(self, paths: list) -> dict:
+        return self._do_import(paths, None)
+
+    @Slot("QVariantList", "QVariantList", result="QVariantMap")
+    def importFilesPicked(self, paths: list, picked: list) -> dict:
+        """只导入用户勾选的那些文件（确认框里的勾选框）。
+
+        `picked` 是文件名列表（basename，不区分大小写）。
+        ★ 必须严格按勾选来：用户主动取消勾选的东西不该被「顺手带上」，
+          否则那个勾选框就成了摆设。
+        """
+        return self._do_import(paths, [str(x) for x in (picked or [])])
+
+    def _do_import(self, paths: list, picked: list | None) -> dict:
         if not self._addons_dir:
             self._set_status("还没设置 MOD 目录")
             self.toast("还没设置 MOD 目录，先去设置里检测一下", "error")
             return {"ok": False, "error": "no dir"}
+        if picked is not None and not picked:
+            self._set_status("没有勾选任何文件")
+            self.toast("没有勾选任何文件", "warn")
+            return {"ok": False, "error": "没有勾选任何文件"}
         game = M.is_game_running()
-        self._set_status(f"正在导入 {len(paths)} 个文件…")
-        res = M.import_files(paths, self._addons_dir)
+        self._set_status(f"正在导入 {len(picked) if picked else len(paths)} 个文件…")
+        res = M.import_files(paths, self._addons_dir, only=picked)
         game = game or bool(res.get("gameRunning"))
         copied = len(res.get("copied") or [])
         skipped = len(res.get("skipped") or [])

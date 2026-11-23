@@ -59,6 +59,13 @@ Item {
     // 「选择」模式：打开之后卡片左下角才出现勾选框，平时不干扰浏览
     property bool selectMode: false
 
+    // ---- 手动指定分类（详情面板那个分类徽标点开的选择器）
+    property string catNewName: ""        // 「新建分类」输入框里的草稿
+    property string catPickerError: ""    // 选择器里的红字提示
+
+    // ---- 导入确认框里的勾选（默认全选，用户可以取消掉不要的）
+    property var importPicked: []
+
     // ---- MOD 简介翻译（和创意工坊详情共用 `translationReady` 那条后端）
     property string descTranslated: ""      // 译文；空 = 还没翻过
     property bool descTranslating: false
@@ -438,6 +445,51 @@ Item {
         page.refreshAddonOrder();
     }
 
+    // ---- 手动指定分类 ----
+    // 点详情面板里那个分类徽标 → 弹出选择器。
+    // 面板不常驻、但保留用户上次展开的「新建分类」输入状态会更好用，
+    // 所以这里只重置错误提示，不动输入框内容。
+    function openCategoryPicker() {
+        if (!page.mgr || !page.qSelected.path) return;
+        page.catPickerError = "";
+        catPicker.open();
+    }
+
+    function chooseCategory(key) {
+        if (!page.mgr || !page.qSelected.path) return;
+        var r = page.mgr.setModCategory(page.qSelected.path, key);
+        if (r && r.ok) {
+            catPicker.close();
+        } else {
+            page.catPickerError = (r && r.error) || "设置失败";
+        }
+    }
+
+    function restoreAutoCategory() {
+        if (!page.mgr || !page.qSelected.path) return;
+        page.mgr.clearModCategory(page.qSelected.path);
+        catPicker.close();
+    }
+
+    function createAndChooseCategory() {
+        if (!page.mgr) return;
+        var name = (page.catNewName || "").trim();
+        if (!name) {
+            page.catPickerError = "先给分类起个名字";
+            return;
+        }
+        var r = page.mgr.createCategory(name);
+        if (!r || !r.ok) {
+            page.catPickerError = (r && r.error) || "新建失败";
+            return;
+        }
+        page.catNewName = "";
+        if (page.qSelected.path)
+            page.chooseCategory(r.key);
+        else
+            catPicker.close();
+    }
+
     // 详情面板的键值行：按实际有值的项动态生成。
     // 工坊字段对本地 MOD 没意义，值可能是 "-" 或空，那就干脆不显示这一行。
     function detailRows() {
@@ -499,10 +551,18 @@ Item {
         page.pendingImport = list;
         // 压缩包要先展开才知道里面到底有几个文件（预演，不落盘）
         var info = page.mgr ? page.mgr.planImport(list)
-                            : { count: list.length, names: [], archives: [] };
+                            : { count: list.length, names: [], archives: [], items: [] };
         if (!info || !info.count)
-            info = { count: list.length, names: [], archives: [] };
+            info = { count: list.length, names: [], archives: [], items: [] };
         page.pendingImportInfo = info;
+        // ★ 默认全选：用户拖进来就是想要它们，逐个勾选是额外负担；
+        //   只有真的不想要某个时才点掉。
+        page.importPicked = [];
+        var items = page.importPickItems();
+        var all = [];
+        for (var j = 0; j < items.length; ++j)
+            all.push(String(items[j].name || ""));
+        page.importPicked = all;
         page.importGameRunning = page.mgr ? page.mgr.gameRunning() : false;
         importConfirm.open();
     }
@@ -515,26 +575,78 @@ Item {
         return page.pendingImport.length;
     }
 
-    // 文件名最多列 5 个，剩下的用「等 N 个」带过
-    function previewImportNames() {
-        var info = page.pendingImportInfo;
-        var names = (info && info.names) ? info.names : [];
-        if (names.length === 0) {
-            var out = [];
-            for (var i = 0; i < page.pendingImport.length; ++i)
-                out.push(page.fileNameOf(page.pendingImport[i]));
-            names = out;
+    // ---- 导入勾选 ----
+    // 确认框里那份清单：直接来自后端 planImport 的 items（顺序一致）。
+    // 没有 items（老后端 / 预演失败）就用 names 兜底生成，保证框里永远有东西。
+    function importPickItems() {
+        var info = page.pendingImportInfo || ({});
+        var items = info.items || [];
+        if (items.length > 0)
+            return items;
+        var names = info.names || [];
+        var out = [];
+        for (var i = 0; i < names.length; ++i) {
+            var n = String(names[i] || "");
+            out.push({
+                name: n,
+                kind: /\.vpk$/i.test(n) ? "mod" : "image",
+                archive: ""
+            });
         }
-        return names.slice(0, 5);
+        return out;
+    }
+
+    function importPickOn(name) {
+        var key = String(name || "").toLowerCase();
+        var sel = page.importPicked || [];
+        for (var i = 0; i < sel.length; ++i)
+            if (String(sel[i]).toLowerCase() === key) return true;
+        return false;
+    }
+
+    function toggleImportPick(name) {
+        var key = String(name || "").toLowerCase();
+        var out = [];
+        var had = false;
+        var sel = page.importPicked || [];
+        for (var i = 0; i < sel.length; ++i) {
+            if (String(sel[i]).toLowerCase() === key) had = true;
+            else out.push(sel[i]);
+        }
+        if (!had) out.push(String(name || ""));
+        page.importPicked = out;
+    }
+
+    function importPickAll(on) {
+        if (!on) {
+            page.importPicked = [];
+            return;
+        }
+        var items = page.importPickItems();
+        var out = [];
+        for (var i = 0; i < items.length; ++i)
+            out.push(String(items[i].name || ""));
+        page.importPicked = out;
+    }
+
+    function importPickCount() {
+        return (page.importPicked || []).length;
     }
 
     function doImport() {
         var list = page.pendingImport;
+        var picked = page.importPicked || [];
         importConfirm.close();
-        if (list && list.length > 0 && page.mgr)
-            page.mgr.importFiles(list);
+        if (picked.length === 0) {
+            // 走 core.showToast：这是本文件里既定的转发方式
+            // （ModManager.toast 虽然也加了 @Slot，但项目里统一从 core 走）
+            core.showToast("没有勾选任何文件", "warn");
+        } else if (list && list.length > 0 && page.mgr) {
+            page.mgr.importFilesPicked(list, picked);
+        }
         page.pendingImport = [];
-        page.pendingImportInfo = ({ count: 0, names: [], archives: [] });
+        page.pendingImportInfo = ({ count: 0, names: [], archives: [], items: [] });
+        page.importPicked = [];
     }
 
     function askDelete(path) {
@@ -1021,18 +1133,37 @@ Item {
                 spacing: 6
 
                 Rectangle {
+                    objectName: "modCategoryBadge"
                     height: 20
-                    width: badTxt.width + 16
+                    width: badTxt.width + 16 + (page.qSelected.categoryManual ? 12 : 0)
                     radius: 5
-                    color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)
+                    color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b,
+                                   catMa.containsMouse ? 0.26 : 0.16)
+                    border.width: page.qSelected.categoryManual ? 1 : 0
+                    border.color: Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                          Theme.accent.b, 0.6)
                     Text {
                         id: badTxt
                         anchors.centerIn: parent
-                        text: page.qSelected.categoryLabel || "其他"
+                        // 手动指定过的加个笔尖，一眼看出「这条不是自动判的」
+                        text: (page.qSelected.categoryLabel || "其他")
+                              + (page.qSelected.categoryManual ? "  \uE70F" : "")
                         color: Theme.accent
                         font.family: Theme.uiFont
                         font.pixelSize: 11
                     }
+                    MouseArea {
+                        id: catMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: page.openCategoryPicker()
+                    }
+                    ToolTip.text: page.qSelected.categoryManual
+                                  ? "已手动指定（点一下改别的分类）"
+                                  : "自动判断的分类（点一下手动指定）"
+                    ToolTip.visible: catMa.containsMouse
+                    ToolTip.delay: 500
                 }
                 Rectangle {
                     height: 20
@@ -3926,6 +4057,7 @@ Item {
     // ==================================================================== 导入确认
     Popup {
         id: importConfirm
+        objectName: "importConfirmDlg"
         anchors.centerIn: Overlay.overlay
         width: 420
         padding: 18
@@ -3951,6 +4083,15 @@ Item {
             }
             Text {
                 width: parent.width
+                text: "压缩包里的 .vpk 已经自动找出来了，默认全选 —— "
+                      + "不要的取消勾选就行。"
+                wrapMode: Text.Wrap
+                color: Theme.textMute
+                font.family: Theme.uiFont
+                font.pixelSize: 11
+            }
+            Text {
+                width: parent.width
                 visible: (page.pendingImportInfo && page.pendingImportInfo.archives
                           && page.pendingImportInfo.archives.length > 0)
                 text: "压缩包：" + (page.pendingImportInfo && page.pendingImportInfo.archives
@@ -3972,7 +4113,7 @@ Item {
             }
             Rectangle {
                 width: parent.width
-                height: Math.min(150, Math.max(40, importList.contentHeight + 12))
+                height: Math.min(190, Math.max(60, importList.contentHeight + 12))
                 radius: Theme.radiusXS
                 color: Theme.surfaceSoft
                 border.width: 1
@@ -3980,31 +4121,114 @@ Item {
 
                 ListView {
                     id: importList
+                    objectName: "importPickList"
                     anchors.fill: parent
                     anchors.margins: 6
                     clip: true
-                    model: page.previewImportNames()
+                    model: page.importPickItems()
                     boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: ScrollBar { width: 10 }
-                    delegate: Text {
-                        required property string modelData
+                    delegate: Item {
+                        required property var modelData
                         width: importList.width
-                        height: 18
-                        text: "· " + modelData
-                        elide: Text.ElideMiddle
-                        color: Theme.textDim
-                        font.family: Theme.uiFont
-                        font.pixelSize: 11
+                        height: 22
+                        readonly property bool on: page.importPickOn(modelData.name)
+                        // 点整行都能勾（不用精准点到那个小方块）
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: page.toggleImportPick(modelData.name)
+                        }
+                        Rectangle {
+                            id: box
+                            anchors.left: parent.left
+                            anchors.leftMargin: 3
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 13; height: 13
+                            radius: 3
+                            color: parent.on
+                                   ? Theme.accent : "transparent"
+                            border.width: 1
+                            border.color: parent.on ? Theme.accent : Theme.borderHi
+                            Text {
+                                anchors.centerIn: parent
+                                visible: parent.parent.on
+                                text: "\uE73E"
+                                font.family: Theme.iconFont
+                                font.pixelSize: 8
+                                color: "#ffffff"
+                            }
+                        }
+                        Text {
+                            anchors.left: box.right
+                            anchors.leftMargin: 8
+                            anchors.right: kindTxt.left
+                            anchors.rightMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: modelData.name
+                            elide: Text.ElideMiddle
+                            color: parent.on ? Theme.text : Theme.textMute
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                        }
+                        Text {
+                            id: kindTxt
+                            anchors.right: parent.right
+                            anchors.rightMargin: 3
+                            anchors.verticalCenter: parent.verticalCenter
+                            // 封面图和 MOD 分开标，用户一眼知道哪条是本体
+                            text: modelData.kind === "image" ? "封面" : "MOD"
+                            color: modelData.kind === "image"
+                                   ? Theme.textMute : Theme.cyan
+                            font.family: Theme.uiFont
+                            font.pixelSize: 9
+                        }
                     }
                 }
             }
-            Text {
+            // 全选 / 全不选 / 计数
+            Row {
                 width: parent.width
-                visible: page.pendingImportCount() > 5
-                text: "…… 等 " + page.pendingImportCount() + " 个文件"
-                color: Theme.textMute
-                font.family: Theme.uiFont
-                font.pixelSize: 11
+                spacing: 10
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "已勾选 " + page.importPickCount() + " / "
+                          + page.importPickItems().length
+                    color: Theme.textMute
+                    font.family: Theme.uiFont
+                    font.pixelSize: 11
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "全选"
+                    color: allMa.containsMouse ? Theme.accent : Theme.textDim
+                    font.family: Theme.uiFont
+                    font.pixelSize: 11
+                    MouseArea {
+                        id: allMa
+                        anchors.fill: parent
+                        anchors.margins: -4
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: page.importPickAll(true)
+                    }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "全不选"
+                    color: noneMa.containsMouse ? Theme.accent : Theme.textDim
+                    font.family: Theme.uiFont
+                    font.pixelSize: 11
+                    MouseArea {
+                        id: noneMa
+                        anchors.fill: parent
+                        anchors.margins: -4
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: page.importPickAll(false)
+                    }
+                }
             }
             Text {
                 width: parent.width
@@ -4049,11 +4273,14 @@ Item {
                     onClicked: {
                         importConfirm.close();
                         page.pendingImport = [];
+                        page.importPicked = [];
                     }
                 }
                 ActionButton {
                     height: 32
                     label: "确认导入"
+                    // 一个都没勾就不给点，省得点了没反应还以为坏了
+                    enabledBtn: page.importPickCount() > 0
                     onClicked: page.doImport()
                 }
             }
@@ -4264,6 +4491,199 @@ Item {
                     height: 32
                     label: "确认转换"
                     onClicked: page.doConvert()
+                }
+            }
+        }
+    }
+
+    // ==================================================================== 手动指定分类
+    //
+    // 为什么要有这个：自动分类靠工坊 tag（作者自己勾的）+ 标题关键词 +
+    // VPK 内部路径猜，一定会错 —— 武器 mod 名字里带 "Zombie" 就被判成感染者、
+    // 「Survivor Weapon Pack」因为 tag 里有 Survivors 被判成生还者、
+    // 本地 mod 连 tag 都没有只能靠文件名。与其无限加规则越加越误伤，
+    // 不如让用户点一下改掉，我们负责记住。
+    Popup {
+        id: catPicker
+        objectName: "catPicker"
+        anchors.centerIn: Overlay.overlay
+        width: 380
+        padding: 18
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            radius: Theme.radius
+            color: Theme.surfaceHi
+            border.width: 1
+            border.color: Theme.borderHi
+        }
+
+        Column {
+            width: parent.width
+            spacing: 10
+
+            Text {
+                width: parent.width
+                text: "这条 MOD 属于哪个分类？"
+                color: Theme.text
+                font.family: Theme.uiFont
+                font.pixelSize: 14
+                font.weight: Font.DemiBold
+            }
+            Text {
+                width: parent.width
+                text: "自动判断是「"
+                      + (page.qSelected.categoryAutoLabel || "其他") + "」"
+                      + (page.qSelected.categoryManual
+                         ? "，你手动改成了「" + (page.qSelected.categoryLabel || "")
+                           + "」。" : "。")
+                      + "改过之后会记住，下次启动、重新扫描都不会变。"
+                color: Theme.textMute
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
+                lineHeight: 1.45
+            }
+
+            // 分类清单：内置 + 自建，两列铺开（11 个分类一列太长）
+            Flickable {
+                id: catFlick
+                width: parent.width
+                height: Math.min(196, catGrid.height + 4)
+                contentWidth: width
+                contentHeight: catGrid.height + 4
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                Grid {
+                    id: catGrid
+                    width: catFlick.width
+                    columns: 2
+                    spacing: 6
+                    Repeater {
+                        model: page.mgr ? page.mgr.categoryChoices : []
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: (catGrid.width - 6) / 2
+                            height: 30
+                            radius: Theme.radiusXS
+                            readonly property bool on: (page.qSelected.category || "")
+                                                       === modelData.key
+                            color: on
+                                   ? Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                             Theme.accent.b, 0.2)
+                                   : (catItemMa.containsMouse
+                                      ? Theme.scrim(0.09) : Theme.scrim(0.04))
+                            border.width: on ? 1 : 0
+                            border.color: Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                                  Theme.accent.b, 0.55)
+                            Text {
+                                anchors.left: parent.left
+                                anchors.leftMargin: 9
+                                anchors.right: parent.right
+                                anchors.rightMargin: 8
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: modelData.label
+                                elide: Text.ElideRight
+                                color: parent.on ? Theme.accent : Theme.textDim
+                                font.family: Theme.uiFont
+                                font.pixelSize: 11
+                                font.weight: parent.on ? Font.DemiBold : Font.Normal
+                            }
+                            MouseArea {
+                                id: catItemMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: page.chooseCategory(modelData.key)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 新建分类
+            Row {
+                width: parent.width
+                spacing: 8
+
+                Item {
+                    width: parent.width - 92
+                    height: 32
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: Theme.radiusXS
+                        color: Theme.surfaceSoft
+                        border.width: 1
+                        border.color: catNameField.activeFocus ? Theme.accent
+                                                               : Theme.border
+                    }
+                    TextInput {
+                        id: catNameField
+                        objectName: "catNameField"
+                        anchors.fill: parent
+                        leftPadding: 10
+                        rightPadding: 10
+                        verticalAlignment: TextInput.AlignVCenter
+                        clip: true
+                        color: Theme.text
+                        font.family: Theme.uiFont
+                        font.pixelSize: 11
+                        selectByMouse: true
+                        maximumLength: 20
+                        text: page.catNewName
+                        onTextChanged: page.catNewName = text
+                        onAccepted: page.createAndChooseCategory()
+                        Text {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: catNameField.text.length === 0
+                            text: "新建一个分类（最多 20 字）"
+                            color: Theme.textMute
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                        }
+                    }
+                }
+                ActionButton {
+                    objectName: "catCreateBtn"
+                    width: 84
+                    height: 32
+                    label: "新建并归类"
+                    onClicked: page.createAndChooseCategory()
+                }
+            }
+
+            Text {
+                width: parent.width
+                visible: page.catPickerError.length > 0
+                text: page.catPickerError
+                color: Theme.warn
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
+            }
+
+            Row {
+                width: parent.width
+                spacing: 8
+
+                // 「恢复自动判断」只在手动指定过之后才有意义
+                ActionButton {
+                    objectName: "catRestoreBtn"
+                    height: 32
+                    accent: false
+                    visible: page.qSelected.categoryManual === true
+                    label: "恢复自动判断"
+                    onClicked: page.restoreAutoCategory()
+                }
+                Item { width: Math.max(0, parent.width - 200); height: 1 }
+                ActionButton {
+                    height: 32
+                    accent: false
+                    label: "取消"
+                    onClicked: catPicker.close()
                 }
             }
         }

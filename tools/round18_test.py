@@ -264,10 +264,12 @@ def main() -> int:
     # ★ 这轮踩过：`page.mgr.toast(...)` 报
     #   `TypeError: Property 'toast' ... is not a function`
     #   —— `ModManager.toast` 当时没加 @Slot，QML 看不见它。
-    #   只查代码行：注释里保留「不能这样调」的说明是对的。
+    #   现在 @Slot 已经补上了（见下面那条断言），所以「调不了」不再是问题；
+    #   但项目里**统一从 core 转发**提示（`core.showToast`），别一会儿 core
+    #   一会儿 mgr，找起来费劲。这条仍然值得盯。
     mp_code = [ln.strip() for ln in mp.splitlines()
                if ln.strip() and not ln.strip().startswith("//")]
-    check("翻译失败不走 ModManager.toast（它以前不是 Slot）",
+    check("提示统一走 core.showToast（不直连 page.mgr.toast）",
           not any("page.mgr.toast(" in ln for ln in mp_code),
           [ln for ln in mp_code if "page.mgr.toast(" in ln][:2])
     check("翻译失败改走 core.showToast", "core.showToast" in mp)
