@@ -245,7 +245,19 @@ def main() -> int:
         check("选中当前分类会高亮", "page.qSelected.category || \"\"" in mp)
         check("有「新建并归类」", 'objectName: "catCreateBtn"' in mp)
         check("有「恢复自动判断」", 'objectName: "catRestoreBtn"' in mp)
-        check("手动指定过的徽标带笔尖标记", "categoryManual ? \"  \\uE70F\"" in mp)
+        # ★ 笔尖现在是**独立的 Text**（以前是拼在分类文字后面的一串字符，
+        #   那会导致徽标多算一截宽度 —— 用户报的「分类文字多出空白」）。
+        #   所以这里查的是结构：有 modCategoryPen、用图标字体、只在手动时可见。
+        check("手动指定过的徽标带笔尖标记",
+              'objectName: "modCategoryPen"' in mp)
+        check("笔尖用图标字体（不是混在正文里）",
+              'objectName: "modCategoryPen"' in mp
+              and "Theme.iconFont" in mp.split('objectName: "modCategoryPen"', 1)[1][:600])
+        check("笔尖只在手动指定时可见",
+              "visible: page.qSelected.categoryManual === true" in
+              mp.split('objectName: "modCategoryPen"', 1)[1][:600])
+        check("宽度由一行布局算，不是手动补像素",
+              "width: catRow.implicitWidth" in mp)
         check("改分类调的是 setModCategory", "mgr.setModCategory(" in mp)
         check("恢复调的是 clearModCategory", "mgr.clearModCategory(" in mp)
 

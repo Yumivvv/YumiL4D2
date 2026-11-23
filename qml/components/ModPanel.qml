@@ -1135,22 +1135,40 @@ Item {
                 Rectangle {
                     objectName: "modCategoryBadge"
                     height: 20
-                    width: badTxt.width + 16 + (page.qSelected.categoryManual ? 12 : 0)
+                    // ★ 宽度必须由「文字 + 图标」各自的 implicitWidth 算出来，
+                    //   不能再像以前那样 `badTxt.width + 16 + 12`：
+                    //   笔尖图标本身已经算在 badTxt 的宽度里了（它是同一个
+                    //   Text 里的一个字符），再补 12px 就是**重复计算** ——
+                    //   手动指定过分类的这条会凭空多出一截空白。
+                    width: catRow.implicitWidth + 16
                     radius: 5
                     color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b,
                                    catMa.containsMouse ? 0.26 : 0.16)
                     border.width: page.qSelected.categoryManual ? 1 : 0
                     border.color: Qt.rgba(Theme.accent.r, Theme.accent.g,
                                           Theme.accent.b, 0.6)
-                    Text {
-                        id: badTxt
+                    Row {
+                        id: catRow
                         anchors.centerIn: parent
+                        spacing: page.qSelected.categoryManual ? 4 : 0
+                        Text {
+                            id: badTxt
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: page.qSelected.categoryLabel || "其他"
+                            color: Theme.accent
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                        }
                         // 手动指定过的加个笔尖，一眼看出「这条不是自动判的」
-                        text: (page.qSelected.categoryLabel || "其他")
-                              + (page.qSelected.categoryManual ? "  \uE70F" : "")
-                        color: Theme.accent
-                        font.family: Theme.uiFont
-                        font.pixelSize: 11
+                        Text {
+                            objectName: "modCategoryPen"
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: page.qSelected.categoryManual === true
+                            text: "\uE70F"
+                            color: Theme.accent
+                            font.family: Theme.iconFont
+                            font.pixelSize: 8
+                        }
                     }
                     MouseArea {
                         id: catMa
