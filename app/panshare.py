@@ -236,8 +236,10 @@ def expire_tag(expire_s: int, now: float | None = None,
     if expired:
         return {"tag": "已过期", "level": "error",
                 "expireDays": 0, "expireHours": 0}
-    if not at:
-        # 0 = 永久有效 / 未知 —— 不显示角标
+    if not at or _is_permanent_sentinel(at):
+        # 0 = 永久有效 / 未知；哨兵值（2100-01-01）同样是「永久」——
+        # 两者都不显示角标。★ `_is_permanent_sentinel` 在文件后面定义，
+        # 这里能调是因为它是模块级函数、调用发生在运行时（不在 import 期）。
         return {"tag": "", "level": "", "expireDays": 0, "expireHours": 0}
     if at <= now:
         return {"tag": "已过期", "level": "error",
@@ -263,6 +265,50 @@ def expire_tag(expire_s: int, now: float | None = None,
             "expireDays": 0, "expireHours": hours}
 
 
+def _is_permanent_sentinel(expire_s: int) -> bool:
+    """这个时间戳其实是「永久有效」的哨兵值吗？
+
+    ★★ 用户报的：「永久有效的网盘显示 26700 天后到期」，
+      例子 `https://pan.quark.cn/s/1396e2ca03d1`。
+
+      实测那条的原始响应：
+
+          "expired_type": 1,
+          "expired_at": 4102416000000     ← 毫秒
+
+      换算过来正好是 **2100-01-01 00:00:00**。也就是说夸克对「永久分享」
+      不是不给字段（以前以为是这样），而是塞一个**远未来**的固定时间戳当哨兵。
+      直接拿它去算天数，就得到 26700 天 —— 数字没错，但语义完全错了。
+
+      判据（两条都命中才算，避免误伤真有长期限的分享）：
+
+      1. 时间戳落在 **2100-01-01 当天**（夸克用的就是这个值）；
+         精确到日即可，不用卡秒 —— 时区换算可能差几小时。
+      2. 距离现在 **超过 40 年**（真的「永久」不会有人设 40 年期限；
+         而一个 2099 年的正常分享会同时满足第 1 条？不会 ——
+         第 1 条要求正好是 2100-01-01，第 2 条只是额外的安全网）。
+
+    实测对照（同一批接口、同一天查的）：
+
+    | 分享 | expired_type | expired_at | 结论 |
+    | --- | --- | --- | --- |
+    | 1396e2ca03d1 | 1 | 2100-01-01 | **永久**（哨兵） |
+    | a96b2f056eae | 3 | 2026-11-28 | 3 天后，正常 |
+    | 百度 101kIrug… | 7 | 2026-11-27 | 百度说永久、但给了时间戳 → **以时间戳为准** |
+    """
+    if not expire_s:
+        return False
+    try:
+        t = time.localtime(int(expire_s))
+    except (ValueError, OSError, OverflowError):
+        return False
+    # 2100-01-01 这一天
+    if (t.tm_year, t.tm_mon, t.tm_mday) != (2100, 1, 1):
+        return False
+    # 再兜一道：必须真的很远（>40 年），防止哪天夸克换了个近一点的哨兵值
+    return int(expire_s) - int(time.time()) > 40 * 366 * 86400
+
+
 def _judge(expire_s: int, now: float) -> dict:
     """按「过期时间戳（秒）」给出结论。0 = 永久有效。
 
@@ -273,7 +319,9 @@ def _judge(expire_s: int, now: float) -> dict:
       它们是界面直接绑定的字段，而 `_refresh()` 会用本函数的返回值**整体替换**
       旧 dict —— 少一个键，QML 那边就拿到 undefined（表现为角标不显示）。
     """
-    if not expire_s:
+    if not expire_s or _is_permanent_sentinel(expire_s):
+        # ★ 哨兵值（夸克的 2100-01-01）也走这一支：按「永久有效」处理，
+        #   不显示角标。否则会算成「26700 天后到期」—— 数字没错但语义是错的。
         return {"ok": True, "state": "ok", "text": "永久有效", "expireAt": 0,
                 "expireDays": 0, "expired": False, "expireTag": "",
                 "expireLevel": ""}
@@ -299,6 +347,12 @@ def _refresh(res: dict, now: float) -> dict:
     out = dict(res or {})
     state = str(out.get("state") or "ok")
     at = int(out.get("expireAt") or 0)
+    # ★ 老缓存里可能已经存了哨兵值（2100-01-01 = 26700 天）。
+    #   `_judge` 也会拦它，但这里先归一化一次更保险 —— 万一哪天 `_judge`
+    #   的分支顺序被改动，缓存里的旧数据也不该重新长出「26700 天后到期」。
+    if _is_permanent_sentinel(at):
+        out["expireAt"] = 0
+        at = 0
     if state in ("gone", "unknown") or not at:
         # 永久有效 / 分享没了 / 查不到：没有「还剩几天」这回事。
         # ★ 但 `expireTag` 还是要给出 —— 界面只认这一个字段来显示角标，
@@ -433,12 +487,27 @@ def _check_quark(url: str, now: float, timeout: float,
         return _unknown()
 
     data = js["data"]
-    # expired_at 是**毫秒**；没有这个字段 = 永久分享
+    # expired_at 是**毫秒**。
+    #
+    # ★ 夸克对「永久分享」**会给字段**，但塞的是哨兵值 2100-01-01 的
+    #   毫秒时间戳（见 `_is_permanent_sentinel` 的说明）。这里先剥掉，
+    #   否则 `_judge` 那条「0 = 永久」的分支永远走不到，
+    #   界面上就会显示「26700 天后到期」（用户报的那个）。
     raw = data.get("expired_at") or 0
     try:
         expire_s = int(int(raw) / 1000) if raw else 0
     except (TypeError, ValueError):
         expire_s = 0
+    if _is_permanent_sentinel(expire_s):
+        expire_s = 0
+    # `expired_type` 也是线索：夸克 1 = 永久（配合哨兵值一起确认），
+    # 3 = 限期。真有时间戳的（type=3）以时间戳为准，不信 type。
+    try:
+        etype = int(data.get("expired_type") or 0)
+    except (TypeError, ValueError):
+        etype = 0
+    if etype == 1 and not expire_s:
+        expire_s = 0        # 显式写成 0，语义是「永久」，下面 _judge 会写「永久有效」
 
     res = _judge(expire_s, now)
     # 拿不到时间戳、但 code 明确说「分享没了」→ 判失效

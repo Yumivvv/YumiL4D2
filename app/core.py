@@ -2115,6 +2115,12 @@ class Core(QObject):
             #   expired / expireText / expireDays 都是它的投影，
             #   保存只为「本次运行内」显示，落盘时 store.Library 会剔除。
             at = int(res.get("expireAt") or 0)
+            # ★ 哨兵值（夸克「永久」用的 2100-01-01）不许落盘。
+            #   `panshare` 那边已经归一化成 0 了，这里再拦一道：
+            #   万一哪天那条链路的实现变了，也不要让 26700 天写进 library.json
+            #   （写进去之后每次读都要重新算，界面又会长出「26700 天后到期」）。
+            if PANS._is_permanent_sentinel(at):
+                at = 0
             if (bool(lk.get("expired")) != expired
                     or lk.get("expireText") != text
                     or int(lk.get("expireDays") or 0) != days

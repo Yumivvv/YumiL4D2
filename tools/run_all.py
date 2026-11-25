@@ -54,6 +54,7 @@ DEFAULT_SUITE = [
     "accel_test",
     "win7_test",
     "consistency_test",
+    "pan_permanent_test",
     "vpk_test",
     "addonlist_test",
     "filter_ui_test",
