@@ -66,7 +66,15 @@ VPK 解析、A2S 查询、网盘链接提取、B 站登录、下载器为独立�
 
 ## 系统要求
 
-Windows 10 / 11，Python 3.10+（源码运行）；或直接用打包好的 exe，无需装 Python。
+**Windows 10 / 11**，Python 3.10+（源码运行）；或直接用打包好的 exe，无需装 Python。
+
+> **不支持 Windows 7 / 8 / 8.1。** 这不是配置问题：Qt 6 和 Python 3.9+ 的运行时
+> 静态依赖 Win8 以后才有的系统 API（`WaitOnAddress`、`CopyFile2`、`SetThreadDescription` 等），
+> 在 Win7 上会直接报「无法定位程序输入点」然后闪退；Win8.1 也缺
+> `SetThreadDescription`（Win10 1607 才有），同样起不来。
+> 实际支持面是 **Windows 10 1607 及以上**。
+> 详细证据和「真要支持需要付什么代价」见
+> [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 的「能不能在 Windows 7 上跑」。
 
 ## 使用说明
 

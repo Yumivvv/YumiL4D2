@@ -65,6 +65,76 @@ python -m PyInstaller --noconfirm --clean --distpath dist --workpath build tools
 **Python 3.12 + PySide6（Qt Quick / QML）**：GPU 加速原生渲染、QML 写界面短、
 不用装新东西、PyInstaller 打包后是独立 exe。
 
+### 能不能在 Windows 7 上跑：不能，而且不是改代码能解决的
+
+**结论：当前版本无法在 Win7 运行。** 双击会直接报「无法定位程序输入点」
+然后闪退 —— 不是某个功能不可用，是进程起不来。
+
+这不是猜的，是读**二进制导入表**（PE Import Directory）得到的：
+
+| 二进制 | 静态导入的 Win7 没有的 API | Win7 上会怎样 |
+| --- | --- | --- |
+| `Qt6Core.dll` | `WaitOnAddress` / `WakeByAddressSingle` / `WakeByAddressAll`（Win8 同步原语）、`SetThreadDescription`（Win10） | 加载即失败 |
+| `python312.dll` | `CopyFile2`、`GetFileInformationByHandleEx`、`PathCchCombineEx` | 加载即失败 |
+
+两个关键点：
+
+1. **它们在静态导入表里，不是延迟加载**。所以是 DLL 一加载就找符号失败，
+   没有「用到某个功能才崩」的余地（延迟加载的才是那样，这里查过，没有）。
+2. **瓶颈不在本项目代码**。`app/`、`main.py` 里没有任何一处直接调用 Win10+
+   专属 API（`GetDpiForWindow`、`SetProcessDpiAwarenessContext` 等都没有）——
+   业务代码本身是干净的，是脚下的运行时抬高了地板。
+
+顺带把 **Win8 / 8.1 也一起排除了**（常有人以为「不是 Win7 就行」）：
+`WaitOnAddress` 那批是 Win8+ 的，但 `SetThreadDescription` 是
+**Win10 1607 (build 14393)** 才进的 kernel32 —— Win8.1 照样缺它，
+一样是加载期失败。所以支持面是 **Windows 10 1607 及以上**，
+不是「Win8 以后」。
+
+这是上游的硬门槛，不是配置问题：
+
+| 组件 | 最后一个支持 Win7 的版本 | 本项目用的 |
+| --- | --- | --- |
+| CPython | **3.8**（3.9 起官方只构建到 Win8.1+） | 3.12.10 |
+| Qt 6 | **不存在**（Qt 6 官方要求 Win10+）；Qt 5.15 是最后支持 Win7 的 | 6.11.2（PySide6） |
+
+顺带一提，现有的 Win10 兼容相关分支在 Win7 上都是**走安全的那条**，
+它们不构成障碍：透明窗口按 `build >= 22000` 判断（Win7 build 7601 → 不透明
+底色），图标字体有 `Segoe Fluent Icons → Segoe MDL2 Assets → Segoe UI Symbol`
+的回退链。也就是说：**要是运行时能跑，界面本身是能在 Win7 上用的。**
+
+#### 真要支持 Win7，得付什么代价
+
+两条路，都不便宜：
+
+| 路线 | 要做什么 | 代价 |
+| --- | --- | --- |
+| **降级运行时** | Python 降到 3.8、PySide6 换成 PySide2（Qt 5.15） | 2.2 万行 QML 要逐项改：`required property` 89 处、`HoverHandler` 23 处、`import QtQuick.Controls.Basic` 9 个文件、`component X:` 内联组件 —— 这些**全是 Qt 6 才有**的写法；此外 PySide2 的 `@Property/@Slot` 行为和 6 有差异，`Signal("QVariantMap")` 等签名要逐个核对 |
+| **Win7 + 现代运行时** | 自己给 Qt 打补丁 / 用非官方构建 | Qt 6 的 `WaitOnAddress` 是 QSemaphore 的实现基础，不是能简单屏蔽的；非官方构建没人维护，出问题只能自己扛 |
+
+现实建议：Win7 用户占比已经很低（Steam 硬件调查里不足 1%），
+而 L4D2 本身在 Win7 上也早已停止官方支持。如果确实有人需要，
+更划算的是**明确写清「需要 Win10+」**，而不是把整个界面框架倒退一个大版本。
+
+#### 怎么自己复核这条结论
+
+仓库里留了检查脚本，随时可跑（不需要 Win7 机器，读的是二进制）：
+
+```bat
+:: 扫一个目录里所有 dll/pyd/exe，列出「Win7 缺失的 API」
+python -X utf8 tools\win7_compat_check.py "D:\Python\Python3.12\Lib\site-packages\PySide6"
+
+:: 区分「静态导入」和「延迟加载」—— 决定是「启动就崩」还是「用到才崩」
+python -X utf8 tools\win7_delay_check.py "...\PySide6\Qt6Core.dll" "...\python312.dll"
+
+:: 完整结论 + 断言（进了全量回归）
+python -X utf8 tools\win7_test.py
+```
+
+> `tools/win7_test.py` 已加进 `run_all.py`。它盯的是「结论有没有变」：
+> 如果哪天 PySide6 / Python 升级后不再依赖这些 API（比如真出了 Win7 兼容
+> 构建），这个测试会立刻失败，提醒你来复核上面的结论。
+
 ### 应用图标
 
 图标是 `assets/icon.ico`（Windows 窗口 / 任务栏 / 托盘 / exe 都用它）和 `assets/appLogo.png`

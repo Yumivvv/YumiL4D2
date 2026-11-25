@@ -52,6 +52,7 @@ DEFAULT_SUITE = [
     "accent_test",
     "theme_test",
     "accel_test",
+    "win7_test",
     "vpk_test",
     "addonlist_test",
     "filter_ui_test",
