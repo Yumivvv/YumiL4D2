@@ -790,9 +790,9 @@ def parse_required_items(html_text: str) -> list[dict]:
 
 
 def _strip_tags(s: str) -> str:
-    s = re.sub(r"<[^>]+>", " ", s or "")
-    s = _html.unescape(s)
-    return re.sub(r"\s+", " ", s).strip()
+    """剥 HTML 标签 → 见 `util.strip_tags`（全项目唯一实现）。"""
+    from .util import strip_tags
+    return strip_tags(s)
 
 
 def fetch_required_items(wid: str, timeout: int = DEP_TIMEOUT) -> dict:
@@ -987,12 +987,9 @@ def download_file_via_ip(url: str, dest_dir: str, filename: str = "",
 
 
 def _safe_filename(name: str) -> str:
-    """清掉 Windows 文件名里不能用的字符。"""
-    raw = os.path.basename(str(name or "").strip())
-    if not raw:
-        return ""
-    raw = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw).strip(" .")
-    return raw[:180]
+    """清文件名 → 见 `util.safe_filename`（全项目唯一实现）。"""
+    from .util import safe_filename
+    return safe_filename(name, max_len=180)
 
 
 def _filename_from_url(url: str) -> str:
@@ -1563,14 +1560,6 @@ class WorkshopDownloader:
 
 
 def _fmt_size(n: object) -> str:
-    try:
-        v = float(n or 0)
-    except (TypeError, ValueError):
-        return "0 B"
-    if v <= 0:
-        return "0 B"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if v < 1024:
-            return f"{v:.0f} {unit}" if unit == "B" else f"{v:.1f} {unit}"
-        v /= 1024.0
-    return f"{v:.1f} PB"
+    """体积格式化 → 见 `util.human_size`（全项目唯一实现）。"""
+    from .util import human_size
+    return human_size(n)

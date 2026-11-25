@@ -71,6 +71,7 @@ import urllib.request
 import zlib
 
 from . import workshop_dns as WDNS
+from . import util
 
 # 和参考实现一致的 UA：Chrome 72。新版 UA 反而更容易被 ESA 挑出来。
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -417,12 +418,13 @@ def _page_meta(page: str) -> tuple[str, str]:
 
 
 def _strip_tags(s: str) -> str:
-    return html.unescape(re.sub(r"<[^>]{1,200}>", "", s or "")).strip()
+    """剥 HTML 标签 → 见 `util.strip_tags`（全项目唯一实现）。"""
+    return util.strip_tags(s)
 
 
 def _safe_filename(name: str) -> str:
-    s = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(name or "")).strip()
-    return s.strip(". ")[:120]
+    """清文件名 → 见 `util.safe_filename`（全项目唯一实现）。"""
+    return util.safe_filename(name, max_len=120)
 
 
 # ---------------------------------------------------------------------------

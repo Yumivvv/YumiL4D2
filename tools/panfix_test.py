@@ -128,12 +128,21 @@ def main():
                   real["expireAt"])
 
     # ---------------------------------------------------------- 5. 界面
-    print("=== 5. 界面有「已过期」角标 ===")
+    print("=== 5. 界面有到期角标（文案由后端统一给）===")
+    # ★ 2026-11 改版：以前 QML 里有两个角标（linkExpiredTag / linkExpiringTag），
+    #   而且**文案是在 QML 里现拼的** —— 「已失效」靠 `indexOf("不存在")` 猜，
+    #   「N 天后到期」靠日历日差拼。两套逻辑各说各话，于是出现
+    #   「22 小时后到期显示成 1 天后」「10 小时显示成今天到期」这种矛盾。
+    #   现在合并成一个 linkExpireTag，文字和颜色都由后端 `expire_tag()` 决定。
     dp = open(os.path.join(ROOT, "qml", "components", "DetailPanel.qml"),
               encoding="utf-8").read()
-    check("DetailPanel 有 linkExpiredTag", 'objectName: "linkExpiredTag"' in dp)
-    check("按 modelData.expired 显示", "modelData.expired === true" in dp)
-    check("文案区分已过期/已失效", '"已失效"' in dp and '"已过期"' in dp)
+    check("DetailPanel 有统一的 linkExpireTag",
+          'objectName: "linkExpireTag"' in dp)
+    check("文案来自 modelData.expireTag", "modelData.expireTag" in dp)
+    check("颜色来自 modelData.expireLevel", "modelData.expireLevel" in dp)
+    check("旧的 linkExpiredTag 已合并", 'objectName: "linkExpiredTag"' not in dp)
+    check("QML 里不再自己判断「已失效」",
+          'indexOf("不存在")' not in dp)
 
     th = open(os.path.join(ROOT, "qml", "L4D2", "Theme.qml"),
               encoding="utf-8").read()
@@ -142,6 +151,12 @@ def main():
     core_src = open(os.path.join(ROOT, "app", "core.py"), encoding="utf-8").read()
     check("core 引入了 panshare", "panshare as PANS" in core_src)
     check("详情加载后查过期", "_check_pan_expiry" in core_src)
+    # 统一后的分档函数要在 panshare 里，且 core 用它
+    ps_src = open(os.path.join(ROOT, "app", "panshare.py"),
+                  encoding="utf-8").read()
+    check("panshare 有统一的 expire_tag()", "def expire_tag(" in ps_src)
+    check("core 调 expire_tag", "PANS.expire_tag(" in core_src)
+    check("core 有「失效 vs 过期」的判断函数", "def _looks_gone(" in core_src)
 
     print()
     if FAILS:

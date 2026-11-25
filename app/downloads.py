@@ -88,20 +88,13 @@ class Cancelled(Exception):
 
 
 def human_size(n: Any) -> str:
-    """字节数转人话。总大小未知时传 0，显示 ``—``。"""
-    try:
-        value = float(n or 0)
-    except (TypeError, ValueError):
-        value = 0.0
-    if value <= 0:
-        return "—"
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024 or unit == "GB":
-            if unit == "B":
-                return f"{int(value)} {unit}"
-            return f"{value:.1f} {unit}"
-        value /= 1024
-    return "—"
+    """字节数转人话。总大小未知时传 0，显示 ``—``。
+
+    ★ 算法在 `util.human_size`（全项目唯一实现），这里只是固定
+      「0 显示成 `—`」—— 下载页需要区分「未知」和「真的是 0 字节」。
+      以前这里有一份完整的重复实现，改一次要改五六个地方。
+    """
+    return util.human_size(n, zero="—")
 
 
 def human_speed(bps: Any) -> str:
@@ -920,20 +913,43 @@ class DownloadManager(QObject):
 
     @Slot()
     def clearFinished(self) -> None:
+        """清空已完成/失败的记录，**并把它们下下来的文件一起删掉**。
+
+        ★ 用户报的：「把下载好的文件移除列表，无法真实删除，还会遗留」。
+          以前的 `clearFinished()` / `removeTask()` 只从内存 `_tasks` 里
+          摘记录，磁盘上的文件一个都不动 —— 列表里看不到了，文件还躺在
+          `downloads/` 或 addons 里，用户越积越多还以为程序没删。
+
+        ★ 为什么不删「下到 addons 的 MOD」：那是用户要用的东西，
+          清个下载记录就把它删了会出人命。所以按 `kind` 区分：
+            · `mod`（下进 addons 的）：**只摘记录，不动文件**
+            · 其它（网盘/视频，落在 downloads/ 下）：记录和文件一起清
+          这个判断放在 `_cleanup_files()` 里，两个入口共用。
+        """
         with self._lock:
-            drop = [i for i, t in self._tasks.items() if not t.active]
-            for tid in drop:
-                self._tasks.pop(tid, None)
+            drop = [t for t in self._tasks.values() if not t.active]
+            paths = [t.dest for t in drop if self._should_delete_file(t)]
+            for t in drop:
+                self._tasks.pop(t.id, None)
                 try:
-                    self._order.remove(tid)
+                    self._order.remove(t.id)
                 except ValueError:
                     pass
         if drop:
-            self._set_status(f"清掉了 {len(drop)} 条记录")
+            removed = self._delete_paths(paths)
+            msg = f"清掉了 {len(drop)} 条记录"
+            if removed:
+                msg += f"，同时删除 {removed} 个文件"
+            self._set_status(msg)
         self._changed()
 
     @Slot(str)
     def removeTask(self, tid: str) -> None:
+        """从列表移除一条记录，并删掉它下下来的文件。
+
+        和 `clearFinished()` 同一套规则（见那边的注释）：
+        下进 addons 的 MOD 不删文件，其它下载产物连文件一起删。
+        """
         with self._lock:
             task = self._tasks.get(tid)
             if task is None or task.active:
@@ -943,7 +959,87 @@ class DownloadManager(QObject):
                 self._order.remove(tid)
             except ValueError:
                 pass
+            drop_path = task.dest if self._should_delete_file(task) else ""
+        removed = self._delete_paths([drop_path] if drop_path else [])
+        if removed:
+            self._set_status(f"已移除并删除文件：{os.path.basename(drop_path)}")
         self._changed()
+
+    # ------------------------------------------------------------ 删除的辅助
+    # 这些是「下载产物」的存放地。只有**落在这些目录下**的文件才允许跟着
+    # 记录一起删 —— 防止 dest 指向别处（比如用户手动选的目录）时误删。
+    def _download_roots(self) -> list[str]:
+        root = str(getattr(util, "ROOT", "") or "")
+        out = []
+        for sub in ("downloads", os.path.join("downloads", "pan"),
+                    os.path.join("downloads", "video")):
+            p = os.path.normcase(os.path.abspath(os.path.join(root, sub)))
+            if p:
+                out.append(p)
+        return out
+
+    def _should_delete_file(self, task) -> bool:
+        """这条任务的产物该不该跟着记录一起删。
+
+        三条都要满足：
+          1. 不是下进 addons 的 MOD（那个是用户要用的，不能删）；
+          2. 状态是完成（失败/取消的本来就没有完整文件，或只留半个残片）；
+          3. 文件确实落在 downloads/ 下（防误删别处的东西）。
+        """
+        if task is None:
+            return False
+        if str(getattr(task, "kind", "")) == "mod":
+            return False
+        if str(getattr(task, "status", "")) != DONE:
+            return False
+        p = str(getattr(task, "dest", "") or "")
+        if not p or not os.path.isfile(p):
+            return False
+        full = os.path.normcase(os.path.abspath(p))
+        parent = os.path.dirname(full)
+        for root in self._download_roots():
+            if parent == root or parent.startswith(root + os.sep):
+                return True
+        return False
+
+    def _delete_paths(self, paths: list[str]) -> int:
+        """真删一批文件（走回收站，删错了能捞回来）。返回删掉的数量。
+
+        复用 `mods.delete_files()`：它已经处理了「文件被占用」、
+        「回收站不可用时退回 os.remove」，这些坑不用再踩一遍。
+        """
+        from . import mods as M
+
+        usable = [p for p in (paths or [])
+                  if p and os.path.isfile(p)
+                  and os.path.normcase(os.path.abspath(p)) !=
+                  os.path.normcase(os.path.abspath(str(getattr(util, "ROOT", ""))))]
+        if not usable:
+            return 0
+        try:
+            res = M.delete_files(usable, to_recycle=bool(self._to_recycle()))
+        except Exception as e:      # noqa: BLE001  删文件失败不能影响列表
+            _log(f"delete download files failed: {e!r}")
+            return 0
+        removed = len(res.get("removed") or [])
+        errors = res.get("errors") or []
+        if errors:
+            _log(f"delete download files: {errors[:3]}")
+            self._toast(f"{len(errors)} 个文件删不掉（可能被占用）", "warn")
+        if removed:
+            _log(f"deleted {removed} downloaded files")
+        return removed
+
+    def _to_recycle(self) -> bool:
+        """跟「删除 MOD」的偏好保持一致（设置里可切直接删除）。"""
+        core = getattr(self, "core", None)
+        try:
+            mods = getattr(core, "mods", None)
+            if mods is not None:
+                return bool(getattr(mods, "_delete_to_recycle", True))
+        except Exception:           # noqa: BLE001
+            pass
+        return True
 
     @Slot(str)
     def openTaskFolder(self, tid: str) -> dict:

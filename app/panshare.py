@@ -189,6 +189,80 @@ def _days_left(expire_s: int, now: float) -> int:
         return max(1, int((expire_s - now) // 86400) + 1)
 
 
+def _hours_left(expire_s: int, now: float) -> int:
+    """还剩几个小时（向下取整，最小 0）。"""
+    try:
+        return max(0, int((expire_s - now) // 3600))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def expire_tag(expire_s: int, now: float | None = None,
+               expired: bool = False, gone: bool = False) -> dict:
+    """把「到期时间」统一翻译成界面要显示的那串字。
+
+    ★★ 为什么要有这个函数（用户报的）：
+      同一条链接，22 小时后到期，界面却显示「1 天后到期」；
+      而另一条今天到期，显示的又是「今天到期」—— 前后不一致。
+      根因是**文案在 QML 里现拼**，用的是「日历日相减」那个 `expireDays`：
+
+          22 小时  → 跨了一天 → expireDays = 1 → 显示「1 天后到期」
+          10 小时  → 同一天   → expireDays = 0 → 显示「今天到期」
+
+      两句话都「不算错」，但放在一起就很怪：明明都是今天到明天之间的事，
+      一个说「1 天后」一个说「今天」。
+
+      现在统一成**按剩余小时分档**，只说一件事：
+
+        > 24 小时        → 「N 天后到期」（N 是按日历日算的整天数）
+        1 ~ 24 小时      → 「N 小时后到期」（N = 1..23，向上取整到「几小时后」）
+        ≤ 1 小时         → 「1 小时内到期」
+        已过期           → 「已过期」/「已失效」
+
+      这样「22 小时」会显示「22 小时后到期」，和「今天到期」不再混着出现 ——
+      因为**根本不再输出「今天到期」这种模糊说法**。
+
+    返回 ``{tag, level, expireDays, expireHours}``：
+      * `tag`    界面直接显示的文字（空串 = 不显示角标）
+      * `level`  `"error"` / `"warn"` / `""`（空 = 不显示）
+      * 另两个是数值，留着给需要判断的调用方用，别在界面里再算一遍。
+    """
+    now = time.time() if now is None else float(now)
+    at = int(expire_s or 0)
+
+    if gone:
+        return {"tag": "已失效", "level": "error",
+                "expireDays": 0, "expireHours": 0}
+    if expired:
+        return {"tag": "已过期", "level": "error",
+                "expireDays": 0, "expireHours": 0}
+    if not at:
+        # 0 = 永久有效 / 未知 —— 不显示角标
+        return {"tag": "", "level": "", "expireDays": 0, "expireHours": 0}
+    if at <= now:
+        return {"tag": "已过期", "level": "error",
+                "expireDays": 0, "expireHours": 0}
+
+    days = _days_left(at, now)
+    hours = _hours_left(at, now)
+    # ★ 分档看的是**剩余小时数**，不是日历天差。
+    #   用户报的典型例子：22 小时后到期，却显示「1 天后到期」——
+    #   因为 22 小时跨了午夜，日历日差 = 1。而 10 小时后到期的又显示
+    #   「今天到期」。两句话放在一起就显得前后不一致。
+    #   现在统一按「还够不够一整天」来分：
+    #     ≥ 24 小时 → 「N 天后到期」（N 用日历日，符合人的数法）
+    #     < 24 小时 → 「N 小时后到期」（不再出现「今天到期」这种模糊说法）
+    if hours >= 24:
+        return {"tag": f"{days} 天后到期", "level": "warn",
+                "expireDays": days, "expireHours": hours}
+    if hours >= 2:
+        return {"tag": f"{hours} 小时后到期", "level": "warn",
+                "expireDays": 0, "expireHours": hours}
+    # 最后一小时（含已不足 1 小时）：给个明确警示，别让人以为还很宽裕
+    return {"tag": "1 小时内到期", "level": "warn",
+            "expireDays": 0, "expireHours": hours}
+
+
 def _judge(expire_s: int, now: float) -> dict:
     """按「过期时间戳（秒）」给出结论。0 = 永久有效。
 
@@ -201,14 +275,18 @@ def _judge(expire_s: int, now: float) -> dict:
     """
     if not expire_s:
         return {"ok": True, "state": "ok", "text": "永久有效", "expireAt": 0,
-                "expireDays": 0, "expired": False}
+                "expireDays": 0, "expired": False, "expireTag": "",
+                "expireLevel": ""}
     if expire_s <= now:
         return {"ok": True, "state": "expired",
                 "text": f"已过期（{_fmt(expire_s)}）", "expireAt": expire_s,
-                "expireDays": 0, "expired": True}
+                "expireDays": 0, "expired": True,
+                "expireTag": "已过期", "expireLevel": "error"}
+    tag = expire_tag(expire_s, now)
     return {"ok": True, "state": "ok", "text": f"{_fmt(expire_s)} 到期",
-            "expireAt": expire_s, "expireDays": _days_left(expire_s, now),
-            "expired": False}
+            "expireAt": expire_s, "expireDays": tag["expireDays"],
+            "expired": False,
+            "expireTag": tag["tag"], "expireLevel": tag["level"]}
 
 
 def _refresh(res: dict, now: float) -> dict:
@@ -222,11 +300,18 @@ def _refresh(res: dict, now: float) -> dict:
     state = str(out.get("state") or "ok")
     at = int(out.get("expireAt") or 0)
     if state in ("gone", "unknown") or not at:
-        # 永久有效 / 分享没了 / 查不到：没有「还剩几天」这回事
+        # 永久有效 / 分享没了 / 查不到：没有「还剩几天」这回事。
+        # ★ 但 `expireTag` 还是要给出 —— 界面只认这一个字段来显示角标，
+        #   少给就会拿到 undefined（表现为「已失效」那条不显示）。
         out["expireDays"] = 0
         out["expired"] = state in ("expired", "gone")
         out.setdefault("text", "")
         out.setdefault("expireAt", 0)
+        tag = expire_tag(0, now, expired=state == "expired",
+                         gone=state == "gone")
+        out["expireTag"] = tag["tag"]
+        out["expireLevel"] = tag["level"]
+        out["expireHours"] = tag["expireHours"]
         return out
     fresh = _judge(at, now)
     fresh["ok"] = bool(out.get("ok", True))

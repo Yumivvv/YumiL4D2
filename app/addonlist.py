@@ -306,14 +306,6 @@ def sync_from_addons(addons_dir: str) -> dict:
 
 
 def _fmt_size(n: object) -> str:
-    try:
-        v = float(n or 0)
-    except (TypeError, ValueError):
-        return "0 B"
-    if v <= 0:
-        return "0 B"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if v < 1024:
-            return f"{v:.0f} {unit}" if unit == "B" else f"{v:.1f} {unit}"
-        v /= 1024.0
-    return f"{v:.1f} PB"
+    """体积格式化 → 见 `util.human_size`（全项目唯一实现）。"""
+    from .util import human_size
+    return human_size(n)

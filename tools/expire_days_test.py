@@ -201,19 +201,63 @@ def main():
         check(f"refresh 输出含 {k}", k in full, sorted(full))
 
     # ---------------------------------------------------------- 7. QML 开关
-    print("=== 7. 界面角标的显示条件跟着改成 expireAt 了 ===")
-    # ★ 这条最容易漏：日历日算法下「今天到期」= 0 天，
-    #   如果 visible 还写 `expireDays > 0`，最该提醒的那条反而被藏起来。
+    print("=== 7. 界面角标：文案由后端给，不再是 QML 现拼 ===")
+    # ★★ 这一节在 2026-11 改过（用户报「22 小时后到期显示成 1 天后」）。
+    #
+    #   以前 QML 自己拼文案：「今天到期」/「N 天后到期」，用的是日历日差
+    #   `expireDays`。于是 22 小时（跨午夜，天数=1）说「1 天后」，
+    #   10 小时（同一天，天数=0）说「今天到期」—— 前后不一致。
+    #
+    #   现在统一：后端 `panshare.expire_tag()` 算好 `expireTag` / `expireLevel`，
+    #   QML 只负责显示，一个字都不拼。所以这里盯的是「QML 没有自己的文案逻辑」。
     dp = open(os.path.join(ROOT, "qml", "components", "DetailPanel.qml"),
               encoding="utf-8").read()
-    i = dp.find('objectName: "linkExpiringTag"')
-    tag = dp[max(0, i - 200): i + 1400] if i > 0 else ""
-    check("有 linkExpiringTag", i > 0)
-    check("显示条件用 expireAt 而不是 expireDays>0",
-          "(modelData.expireAt || 0) > 0" in tag, )
-    check("不再用 expireDays > 0 当开关",
-          "(modelData.expireDays || 0) > 0" not in tag)
-    check("0 天显示「今天到期」", '<= 0' in tag and "今天到期" in tag)
+    i = dp.find('objectName: "linkExpireTag"')
+    tag = dp[max(0, i - 300): i + 1600] if i > 0 else ""
+    check("有统一的 linkExpireTag", i > 0)
+    check("文案来自后端 expireTag", "modelData.expireTag" in tag)
+    check("颜色来自后端 expireLevel", "modelData.expireLevel" in tag)
+    # 这几个词只该在 Python 里出现，QML 里出现就说明又分叉了。
+    # ★ 只查**代码行**，注释里解释「以前怎么拼的」是允许的（也有价值）。
+    tag_code = [ln.strip() for ln in tag.splitlines()
+                if ln.strip() and not ln.strip().startswith("//")]
+    check("QML 里不再拼「今天到期」",
+          not any("今天到期" in ln for ln in tag_code), str(tag_code[:3]))
+    check("QML 里不再拼「天后到期」",
+          not any("天后到期" in ln for ln in tag_code), str(tag_code[:3]))
+    check("QML 里不再自己判断「已失效」",
+          not any(('"已失效"' in ln or '"已过期"' in ln) for ln in tag_code),
+          str(tag_code[:3]))
+    # 旧的「过期」「快到期」两个角标应该已经合并成一个
+    check("旧的 linkExpiredTag 已合并",
+          'objectName: "linkExpiredTag"' not in dp)
+    check("旧的 linkExpiringTag 已合并",
+          'objectName: "linkExpiringTag"' not in dp)
+
+    # 分档逻辑在 Python 里，直接验它
+    print("=== 7b. expire_tag 分档（用户报的 22 小时）===")
+    import datetime as _dt
+    _now = _dt.datetime(2026, 11, 25, 13, 0).timestamp()
+
+    def _tag(hours: float) -> dict:
+        return PS.expire_tag(_now + hours * 3600, _now)
+
+    check("22 小时 → 「22 小时后到期」（不是「1 天后」）",
+          _tag(22)["tag"] == "22 小时后到期", _tag(22)["tag"])
+    check("10 小时 → 「10 小时后到期」（不是「今天到期」）",
+          _tag(10)["tag"] == "10 小时后到期", _tag(10)["tag"])
+    check("24 小时 → 走「天」这一档",
+          "天后到期" in _tag(24)["tag"], _tag(24)["tag"])
+    check("3 天 → 「3 天后到期」", _tag(72)["tag"] == "3 天后到期",
+          _tag(72)["tag"])
+    check("不足 1 小时 → 「1 小时内到期」",
+          _tag(0.5)["tag"] == "1 小时内到期", _tag(0.5)["tag"])
+    check("已过期 → 「已过期」", _tag(-1)["tag"] == "已过期",
+          _tag(-1)["tag"])
+    # ★ 「永久有效」要传 expireAt=0，不能传「现在+0 小时」——
+    #   后者是个已经过去的时间戳，会被判成「已过期」。
+    check("永久有效 → 不显示角标",
+          PS.expire_tag(0, _now)["tag"] == "", repr(PS.expire_tag(0, _now)["tag"]))
 
     print()
     if FAILS:

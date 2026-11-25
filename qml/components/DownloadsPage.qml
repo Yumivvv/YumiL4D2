@@ -198,6 +198,28 @@ Item {
                 glyph: "\uE74D"
                 accent: false
                 enabledBtn: page.counts("done") + page.counts("failed") > 0
+                // ★ 这一下现在会**连文件一起删**（以前只摘记录，文件留在磁盘上，
+                //   用户报的「无法真实删除，还会遗留」）。提示要说清楚；
+                //   下进 addons 的 MOD 仍然只摘记录，也照实写出来。
+                //
+                //   注意 ActionButton 没有 tip 属性（那是 IconButton 的），
+                //   所以这里挂 ToolTip，别写 `tip:` —— 那样会被静默忽略。
+                //
+                //   ★ 也不能写成 `ToolTip.visible: clrHover.containsMouse`
+                //     再在下面声明 `HoverHandler { id: clrHover }`：
+                //     同一对象里**先引用后声明**，属性绑定求值时 clrHover
+                //     还没实例化，Qt 会报 "Unable to assign [undefined] to bool"。
+                //     用 HoverHandler 自己的 `hovered` 属性就没有这个问题。
+                ToolTip.text: "清掉已完成/失败的记录，并删除下载的文件"
+                              + "（进回收站；下进 addons 的 MOD 文件保留）"
+                ToolTip.delay: 500
+                ToolTip.visible: clrHover.hovered
+                HoverHandler {
+                    id: clrHover
+                    // HoverHandler 默认只在 pressed 时才算 hovered，
+                    // 要显式打开「悬停即真」，否则提示永远不弹。
+                    blocking: false
+                }
                 onClicked: if (page.mgr) page.mgr.clearFinished()
             }
         }
@@ -471,7 +493,14 @@ Item {
                 IconButton {
                     objectName: "dlRemoveBtn"
                     glyph: "\uE74D"
-                    tip: "从列表移除"
+                    // ★ 现在这一下**真的会删文件**（以前只摘记录，磁盘上还在，
+                    //   用户报的「无法真实删除，还会遗留」就是它）。
+                    //   提示必须说实话，不能还写「从列表移除」。
+                    //   下进 addons 的 MOD 仍然只摘记录（见 downloads.py 里的
+                    //   `_should_delete_file`），这里也照实说明。
+                    tip: modelData.kind === "mod"
+                         ? "从列表移除（MOD 文件会保留）"
+                         : "移除并删除下载的文件（进回收站，可还原）"
                     boxSize: 24
                     visible: !modelData.active
                     onClicked: if (page.mgr) page.mgr.removeTask(modelData.id)

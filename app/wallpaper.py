@@ -33,6 +33,7 @@ import shutil
 
 from . import util as _util
 from .util import BG_DIR, Log
+from .util import human_size as _human_size
 
 log = Log("wallpaper.log")
 
@@ -134,15 +135,8 @@ def list_backgrounds() -> list[dict]:
     }]
 
 
-def human_size(n: float) -> str:
-    n = float(n or 0)
-    if n <= 0:
-        return "0 B"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024.0
-    return f"{n:.1f} PB"
+# ★ 体积格式化统一走 util.human_size（全项目唯一实现）。
+human_size = _human_size
 
 
 def import_background(src: str) -> dict:

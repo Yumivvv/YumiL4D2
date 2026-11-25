@@ -270,11 +270,75 @@ def fmt_rel(ts: int | float | None) -> str:
     return fmt_ts(ts, "%Y-%m-%d")
 
 
-def human_size(n: float) -> str:
-    """字节数 → 人类可读体积（1.2 MB / 340 KB）。"""
-    n = float(n or 0)
+def strip_tags(s: str, *, collapse: bool = True) -> str:
+    """剥掉 HTML 标签并反转义实体，返回给人看的一行文字。
+
+    ★ 这是**全项目唯一**的实现。以前 `lanzou.py` 和 `workshop_dl.py`
+      各有一份，而且两份行为**不一样**：
+
+        lanzou:       re.sub(r"<[^>]{1,200}>", "")   → 标签直接删除，
+                      可能把相邻单词黏在一起（`a<b>c` → `ac`）
+        workshop_dl:  re.sub(r"<[^>]+>", " ")        → 标签换成空格，
+                      再把连续空白压成一个（`a<b>c` → `a c`）
+
+      第二个才是对的（HTML 里 `<br>` / 块级标签本来就该断词）。
+      统一到这里，用「换空格 + 压空白」的语义。
+
+    `collapse=False`：保留原始空白（只剥标签），给需要保留换行的场景用。
+    """
+    text = str(s or "")
+    text = re.sub(r"<[^>]{1,200}>", " ", text)
+    text = html.unescape(text)
+    if collapse:
+        text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def safe_filename(name: str, max_len: int = 120,
+                  keep_basename: bool = True) -> str:
+    """清掉 Windows 文件名里不能用的字符，返回一个能落盘的名字。
+
+    ★ 全项目唯一实现。以前 `lanzou.py` 和 `workshop_dl.py` 各有一份，
+      而且**不一样**：
+
+        lanzou:       不取 basename，截 120 字，保留首尾点号
+        workshop_dl:  取 basename，截 180 字，去掉首尾点号和空格
+
+      Windows 不允许文件名以点或空格结尾（`a.` / `a ` 都建不出来），
+      所以「去掉首尾点和空格」这条必须统一带上，否则某个入口传进来的
+      名字可能落盘失败。
+
+    `max_len`：长度上限。蓝奏云那边给 120（够用且不会太长），
+      工坊下载给 180（工坊 ID 长、名字也长）。
+    `keep_basename`：是否先把路径部分去掉（`a/b/c.vpk` → `c.vpk`）。
+      下载已有目标目录时该去掉；只想要「文件名」的调用方也该去掉。
+    """
+    raw = str(name or "").strip()
+    if keep_basename:
+        raw = os.path.basename(raw)
+    if not raw:
+        return ""
+    raw = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw)
+    return raw.strip(" .")[:max_len]
+
+
+def human_size(n: float, zero: str = "0 B") -> str:
+    """字节数 → 人类可读体积（1.2 MB / 340 KB）。
+
+    ★ 这是**全项目唯一**的体积格式化实现。以前有 6 份副本
+      （core / mods / wallpaper / player 各一个 `human_bytes` 或
+      `human_size`，downloads 里一份显示 `—` 的变体），算法完全一样，
+      改一处很容易漏掉别的 —— 正是「屎山」的典型来源。现在都转发到这里。
+
+    `zero`：0 或负数时返回什么。下载页要显示 `—`（表示「未知」），
+    其它地方要 `0 B`（表示「真的是 0」），所以留一个参数。
+    """
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        return zero
     if n <= 0:
-        return "0 B"
+        return zero
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"

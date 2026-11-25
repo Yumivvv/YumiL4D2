@@ -42,6 +42,7 @@ import requests
 
 from . import netclient as NC
 from .util import DATA_DIR, Log
+from .util import human_size as _human_size
 
 log = Log("mods.log")
 
@@ -161,15 +162,10 @@ def forget_imports(names: Iterable[str]) -> None:
         _atomic_json(IMPORT_LEDGER_PATH, data)
 
 
-def human_size(n: float) -> str:
-    n = float(n or 0)
-    if n <= 0:
-        return "0 B"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024.0
-    return f"{n:.1f} PB"
+# ★ 体积格式化统一走 util.human_size（全项目唯一实现）。
+#   这里以前有一份逐字节相同的副本，和 core/wallpaper/player 里的那几份
+#   完全一样 —— 改一处漏三处，就是「屎山」的来源。
+human_size = _human_size
 
 
 def workshop_id_of(filename: str) -> str:

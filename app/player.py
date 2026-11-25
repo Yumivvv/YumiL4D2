@@ -45,6 +45,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 
 from .bili import BiliClient, BiliError
 from .util import CACHE_DIR, Log
+from .util import human_size
 
 log = Log("player.log")
 
@@ -480,12 +481,5 @@ def _fmt_ms(ms: int) -> str:
     return f"{m}:{s:02d}"
 
 
-def human_bytes(n: float) -> str:
-    n = float(n or 0)
-    if n <= 0:
-        return "0 B"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024.0
-    return f"{n:.1f} PB"
+# ★ 体积格式化统一走 util.human_size（全项目唯一实现），这里保留旧名字。
+human_bytes = human_size

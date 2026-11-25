@@ -582,66 +582,46 @@ Item {
                                     }
                                 }
 
-                                // ---- 已过期 / 已失效角标 ----
-                                // 后端查百度 shorturlinfo 拿到的结论（见 app/panshare.py）。
-                                // 过期了就直接写在链接旁边，用户不用点开才发现「分享已过期」。
+                                // ---- 到期角标（已过期 / 已失效 / N 天后 / N 小时后）----
+                                //
+                                // ★★ 文案**一律由后端给**（`modelData.expireTag`），
+                                //   界面不再自己拼。
+                                //
+                                //   以前这里现拼：
+                                //     text: expireDays <= 0 ? "今天到期"
+                                //                           : expireDays + " 天后到期"
+                                //   而 `expireDays` 是「日历日相减」，于是：
+                                //     · 22 小时后到期（跨了午夜）→ 天数=1 → 「1 天后到期」
+                                //     · 10 小时后到期（同一天）  → 天数=0 → 「今天到期」
+                                //   两条链接明明都是「今天到明天之间」，却说成两套话 ——
+                                //   用户报的「同样是 22 小时后到期却显示一天后」就是它。
+                                //
+                                //   现在后端 `panshare.expire_tag()` 按**剩余小时**统一分档：
+                                //     ≥24h → 「N 天后到期」；2~23h → 「N 小时后到期」；
+                                //     <2h  → 「1 小时内到期」；过期/失效 → 各自的词。
+                                //
+                                //   颜色也只在这里按 `expireLevel` 选一次。
                                 Rectangle {
-                                    objectName: "linkExpiredTag"
-                                    visible: modelData.expired === true
+                                    objectName: "linkExpireTag"
+                                    readonly property string tag: modelData.expireTag || ""
+                                    readonly property string lvl: modelData.expireLevel || ""
+                                    readonly property color tagColor: lvl === "error"
+                                                                      ? Theme.error : Theme.warn
+                                    visible: tag.length > 0
                                     height: 16
                                     width: expTxt.implicitWidth + 10
                                     radius: 3
-                                    color: Qt.rgba(Theme.error.r, Theme.error.g,
-                                                   Theme.error.b, 0.18)
+                                    color: Qt.rgba(tagColor.r, tagColor.g,
+                                                   tagColor.b, lvl === "error" ? 0.18 : 0.16)
                                     border.width: 1
-                                    border.color: Qt.rgba(Theme.error.r, Theme.error.g,
-                                                          Theme.error.b, 0.42)
+                                    border.color: Qt.rgba(tagColor.r, tagColor.g,
+                                                          tagColor.b, lvl === "error" ? 0.42 : 0.42)
                                     anchors.verticalCenter: parent.verticalCenter
                                     Text {
                                         id: expTxt
                                         anchors.centerIn: parent
-                                        text: (modelData.expireText || "").indexOf("不存在") >= 0
-                                              ? "已失效" : "已过期"
-                                        color: Theme.error
-                                        font.family: Theme.uiFont
-                                        font.pixelSize: 9
-                                        font.weight: Font.DemiBold
-                                    }
-                                }
-
-                                // ---- 「N 天后到期」提醒 ----
-                                // ★ 用户报的：「7 天后过期的链接没有提示」。
-                                //   以前 expireText 只在**已过期**那个红角标里用，
-                                //   没过期的链接虽然查到了到期日，却一个字都不显示 ——
-                                //   等于白查。现在快到期（≤30 天）就用橙色角标提醒，
-                                //   让人趁早存一份，而不是等到点开才发现失效。
-                                //
-                                // ★ 判断条件必须用 `expireAt > 0`（有确切到期日），
-                                //   **不能**用 `expireDays > 0`：`expireDays` 现在是
-                                //   「按日历日算还剩几天」，今天到期正好是 0，
-                                //   用它当开关会把「今天到期」这条藏起来。
-                                Rectangle {
-                                    objectName: "linkExpiringTag"
-                                    visible: !(modelData.expired === true)
-                                             && (modelData.expireAt || 0) > 0
-                                             && (modelData.expireDays || 0) <= 30
-                                    height: 16
-                                    width: soonTxt.implicitWidth + 10
-                                    radius: 3
-                                    color: Qt.rgba(Theme.warn.r, Theme.warn.g,
-                                                   Theme.warn.b, 0.16)
-                                    border.width: 1
-                                    border.color: Qt.rgba(Theme.warn.r, Theme.warn.g,
-                                                          Theme.warn.b, 0.42)
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    Text {
-                                        id: soonTxt
-                                        anchors.centerIn: parent
-                                        // 0 = 今天到期（按日历日算），1 = 明天
-                                        text: (modelData.expireDays || 0) <= 0
-                                              ? "今天到期"
-                                              : ((modelData.expireDays || 0) + " 天后到期")
-                                        color: Theme.warn
+                                        text: parent.tag
+                                        color: parent.tagColor
                                         font.family: Theme.uiFont
                                         font.pixelSize: 9
                                         font.weight: Font.DemiBold

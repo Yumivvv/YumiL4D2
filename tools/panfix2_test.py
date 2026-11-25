@@ -53,30 +53,44 @@ def main():
             d = int(real.get("expireDays") or 0)
             check("快到期时 expireDays 在 1~31 之间", 0 < d <= 31, d)
 
-    # 界面要有那个角标
+    # 界面要有那个角标。
+    # ★ 2026-11 改版：原来是两个角标（linkExpiredTag + linkExpiringTag），
+    #   文案在 QML 里现拼（「今天到期」/「N 天后到期」）。那两个角标用的
+    #   都是日历日差，于是「22 小时后到期」显示成「1 天后」、
+    #   「10 小时后到期」显示成「今天到期」—— 用户报的前后不一致。
+    #   现在合并成一个 linkExpireTag，文案/颜色全部由后端 `expire_tag()` 给。
     dp = open(os.path.join(ROOT, "qml", "components", "DetailPanel.qml"),
               encoding="utf-8").read()
-    check("界面有 linkExpiringTag", 'objectName: "linkExpiringTag"' in dp)
-    check("按 expireDays 显示", "modelData.expireDays" in dp)
-    check("文案「天后到期」", "天后到期" in dp)
-    check("过期时不重复显示快到期",
-          "!(modelData.expired === true)" in dp)
+    check("界面有统一的 linkExpireTag", 'objectName: "linkExpireTag"' in dp)
+    check("文案来自后端 expireTag", "modelData.expireTag" in dp)
+    check("颜色来自后端 expireLevel", "modelData.expireLevel" in dp)
+    check("旧的 linkExpiringTag 已合并", 'objectName: "linkExpiringTag"' not in dp)
+    check("旧的 linkExpiredTag 已合并", 'objectName: "linkExpiredTag"' not in dp)
 
     core_src = open(os.path.join(ROOT, "app", "core.py"), encoding="utf-8").read()
     check("core 把 expireDays 传给界面", 'lk["expireDays"] = days' in core_src)
+    check("core 也把 expireTag 传给界面", "expireTag" in core_src)
 
     # ---------------------------------------------------------- 1b. 真 bug
     print("=== 1b. rec 里必须有 links，否则一次都不查 ===")
     # 用户第二次报「百度网盘还是没有显示过期」。
     # 根因：links 只在 _detail_payload() 里临时算、**从没写回 rec**，
     # 而 _check_pan_expiry(rec) 读的是 rec.get("links") → 永远空 → 直接 return。
-    # 第一版误以为只是渲染问题。所以这里显式检查「worker 里会补 rec['links']」。
-    i = core_src.find("def _detail_worker")
-    wbody = core_src[i:i + 6000] if i > 0 else ""
-    check("worker 里会补 rec['links']", 'rec["links"] = extract_links(' in wbody)
-    check("补的时候用了 desc", 'rec.get("desc")' in wbody)
-    check("也补了置顶评论里的链接",
-          "topComment" in wbody and "extra" in wbody)
+    #
+    # ★ 2026-11：补 links 的逻辑已经**挪进 `_check_pan_expiry()` 自己**了
+    #   （原来散在调用方 `_detail_worker` 里，而且只在 links 为空时才补，
+    #   导致置顶评论里那条永远进不来）。所以这里不再盯「某个函数体里有没有
+    #   某一行」，而是盯**语义**：`_check_pan_expiry` 里必须
+    #     1) 从 desc 提取；2) 从 topComment 提取；3) 按 url 去重后写回 rec。
+    i = core_src.find("def _check_pan_expiry")
+    j = core_src.find("def __", i + 10) if i > 0 else -1
+    body = core_src[i:(j if j > i else i + 6000)] if i > 0 else ""
+    check("_check_pan_expiry 里会补 rec['links']",
+          'rec["links"] = base' in body or 'rec["links"] = ' in body,
+          body[:0] if body else "找不到 _check_pan_expiry")
+    check("补的时候用了 desc", 'rec.get("desc")' in body)
+    check("也补了置顶评论里的链接", "topComment" in body)
+    check("按 url 去重（不重复添加）", "seen" in body)
 
     # 真实路径验证：造一条**只有 desc** 的记录，走完整流程
     from PySide6.QtWidgets import QApplication
@@ -204,13 +218,27 @@ def main():
         ("永久", 0, "ok", 0),                      # 0 = 没有时间戳
         ("已过期 3 天", _at_day(-3), "expired", 0),
         ("还剩 7 天", _at_day(7), "ok", 7),
-        ("还剩 1 天", _at_day(1), "ok", 1),
-        ("今天到期", _at_day(0, 23), "ok", 0),      # 今天 23 点 = 还剩 0 个日历天
+        # ★ 「明天中午」= 22~23 小时后，**不足 24 小时**，所以 expireDays 是 0。
+        #   以前这里期望 1（日历日差），于是界面把它显示成「1 天后到期」——
+        #   而更近的「今天 23 点」（9 小时后）却显示「今天到期」，前后不一致。
+        #   现在 expireDays 只在「≥24 小时」时才是正数，<24 小时一律 0、
+        #   由 expireTag 去说「N 小时后到期」。见 tools/expire_days_test.py 第 7b 节。
+        ("不足 24 小时（明天中午）", _at_day(1), "ok", 0),
+        ("今天 23 点（几小时后）", _at_day(0, 23), "ok", 0),
     ):
         got = PS._judge(ts, now2)
-        check(f"_judge {label:10s}", got.get("state") == want_state
+        check(f"_judge {label:20s}", got.get("state") == want_state
               and int(got.get("expireDays") or 0) == want_days,
               f"{got.get('state')}/{got.get('expireDays')}")
+
+    # 文案分档：不足 24 小时应该说「N 小时后」，不是「今天到期」
+    _near = PS._judge(_at_day(1), now2)
+    check("不足 24 小时的文案是「小时后」",
+          "小时后到期" in str(_near.get("expireTag")),
+          _near.get("expireTag"))
+    check("不再出现「今天到期」这种说法",
+          "今天到期" not in str(_near.get("expireTag")),
+          _near.get("expireTag"))
 
     # 跨天必须真的少一天（这就是用户报的那个 bug 的核心）
     _e = _at_day(7)

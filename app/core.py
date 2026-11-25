@@ -74,6 +74,7 @@ from .util import (
     norm_url,
     trim_cover_cache,
 )
+from .util import human_size as _human_size
 from .wallpaper import (
     BG_STEM,
     DEFAULT_OPACITY,
@@ -106,15 +107,8 @@ def bg_root() -> str:
     return getattr(_util, "BG_DIR", BG_DIR) or BG_DIR
 
 
-def human_bytes(n: float) -> str:
-    n = float(n or 0)
-    if n <= 0:
-        return "0 B"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024.0
-    return f"{n:.1f} PB"
+# ★ 体积格式化统一走 util.human_size（全项目唯一实现），这里保留旧名字。
+human_bytes = _human_size
 
 
 def mod_cache_info() -> dict:
@@ -217,6 +211,27 @@ class VideoModel(QAbstractListModel):
                 )
                 return True
         return False
+
+
+def _looks_gone(text: str) -> bool:
+    """这句「到期说明」是在说「分享没了」而不是「到期了」吗？
+
+    ★ 为什么要单独一个函数：界面上「已过期」和「已失效」是两个颜色不同的
+      角标（红 / 更红），语义也不同 —— 过期是「时间到了」，失效是
+      「作者删了或取消了」。以前这个判断写在 QML 里（`indexOf("不存在")`），
+      文案一改就对不上。现在统一在这里判，QML 只认后端给的 `expireTag`。
+
+    判据按「先看明确的失效词，再排除过期词」的顺序，避免
+    「分享已过期（已超过有效期）」这种同时含两个词的说法被误判成失效。
+    """
+    s = str(text or "")
+    if not s:
+        return False
+    gone_words = ("不存在", "已取消", "被取消", "已失效", "打不开", "删除了")
+    if any(w in s for w in gone_words):
+        return True
+    # 只说了「过期」的，算过期不算失效
+    return False
 
 
 def _decorate(item: dict) -> dict:
@@ -2022,16 +2037,10 @@ class Core(QObject):
         #   一次都没真正查过。这就是「百度网盘还是不显示过期」的根因
         #   （第一版以为只是渲染问题，其实连查询都没发生）。
         try:
-            if not rec.get("links"):
-                rec["links"] = extract_links(
-                    rec.get("desc") or "", fallback_label=rec.get("title") or "")
-                extra = extract_links(
-                    ((rec.get("topComment") or {}).get("text") or ""),
-                    fallback_label=rec.get("title") or "")
-                if extra:
-                    seen = {lk.get("url") for lk in rec["links"]}
-                    rec["links"] = list(rec["links"]) + [
-                        lk for lk in extra if lk.get("url") not in seen]
+            # ★ 链接的「补缺」+ 过期查询都在 `_check_pan_expiry()` 里
+            #   （那边会先把简介/置顶评论的链接补齐、按 url 去重，再查）。
+            #   这里只负责调它，别在调用方再写一份合并逻辑 ——
+            #   两份逻辑迟早会分叉，出问题时不知道该信哪一份。
             self._check_pan_expiry(rec)
         except Exception as e:  # noqa: BLE001  过期检查失败不影响详情
             log(f"pan expiry check crashed {bvid}: {e!r}")
@@ -2043,6 +2052,31 @@ class Core(QObject):
         再发一次 detailReady 让界面刷新 —— 用户会看到链接旁边多出一个
         「已过期」角标，不用逐个点开试。
         """
+        # ★★ 先把「简介 + 置顶评论」里的链接补齐（按 url 去重），再查。
+        #
+        #   用户的链接常常分散在两处。以前只认 `rec["links"]`，而它可能是
+        #   老缓存里「只有简介那一条」的版本 —— 置顶评论里那条**永远进不来**，
+        #   自然永远不会被查过期。表现就是「下面的网盘不检测到期时间」。
+        #   所以每次进来都做一次补缺（幂等：已经有的 url 不会重复添加）。
+        try:
+            base = list(rec.get("links") or [])
+            seen = {str(lk.get("url") or "") for lk in base if lk.get("url")}
+            label = rec.get("title") or ""
+            for src_text in (rec.get("desc") or "",
+                             (rec.get("topComment") or {}).get("text") or ""):
+                if not str(src_text).strip():
+                    continue
+                for lk in extract_links(src_text, fallback_label=label):
+                    u = str(lk.get("url") or "")
+                    if not u or u in seen:
+                        continue
+                    seen.add(u)
+                    base.append(lk)
+            if base:
+                rec["links"] = base
+        except Exception as e:  # noqa: BLE001  补链接失败不该挡住查询
+            log(f"pan links merge failed: {e!r}")
+
         links = rec.get("links") or []
         if not links:
             return
@@ -2052,8 +2086,17 @@ class Core(QObject):
         try:
             # ★ 把提取码一起传下去：夸克那边带上更接近真实访客的请求
             #   （用户报的那条 `f333944cc3c6` 码是 `1iqM`，正是从详情里提取到的）。
-            codes = {str(lk.get("url") or ""): str(lk.get("code") or "")
-                     for lk in links}
+            #
+            # ★ 同一个 url 可能出现多次而提取码不同（简介里带码、评论里没带码）。
+            #   直接 `{url: code}` 会让后一条**覆盖**前一条，于是前面那条按错的码
+            #   去查、可能白查一次。这里改成「同一个 url 取第一个非空码」——
+            #   空码不该盖掉有码的那条。
+            codes: dict[str, str] = {}
+            for lk in links:
+                u = str(lk.get("url") or "")
+                c = str(lk.get("code") or "").strip()
+                if u and (u not in codes or (not codes[u] and c)):
+                    codes[u] = c
             results = PANS.check_many(urls, codes=codes)
         except Exception as e:  # noqa: BLE001
             log(f"check_many failed: {e!r}")
@@ -2137,37 +2180,69 @@ class Core(QObject):
         #   `rec["links"]` 里的那些 dict 上的。于是「查到了过期信息 → 推送界面」
         #   时，_detail_payload 又重算一遍 links，**把查好的 expired/expireDays
         #   全冲掉了** —— 用户看到的就是「百度网盘还是不显示过期」。
-        #   现在按 url 把 rec 里已经查到的状态回填过来。
-        known = {str(x.get("url") or ""): x for x in (rec.get("links") or [])}
+        #   现在把 rec 里已经查到的状态回填过来。
+        #
+        # ★★★ 回填**必须按位置对**，不能按 url 建字典。
+        #   同一个视频里经常有重复链接（简介写一遍、置顶评论再发一遍，
+        #   或者「主链接 / 备用链接」其实是同一条）。按 url 建 dict 时
+        #   后一条会把前一条**覆盖掉**，于是：
+        #     · 重复的那几行都拿到同一个结果（哪怕其中一条查失败也会显示成功）；
+        #     · 更糟的是 `len(known) < len(d["links"])`，看起来就像
+        #       「只检测了上面那条，下面那个没检测」—— 用户报的就是这个。
+        #   现在两条都按顺序对齐：`rec["links"]` 和 `d["links"]` 是同一次
+        #   extract_links 的产物、顺序与条数完全一致（见上面那段合并逻辑），
+        #   所以用 zip 按下标取就行。
+        known_list = list(rec.get("links") or [])
+        # 条数对不上时（老数据 / 中途被别的版本改过）退回按 url 查，但**不覆盖**
+        # 已经填过的行 —— 宁可少填一条，也不要把 A 的状态写到 B 上。
+        aligned = len(known_list) == len(d["links"])
+        known_by_url: dict[str, dict] = {}
+        for x in known_list:
+            known_by_url.setdefault(str(x.get("url") or ""), x)
         now = time.time()
-        for lk in d["links"]:
+        for idx, lk in enumerate(d["links"]):
             u = str(lk.get("url") or "")
-            src = known.get(u)
+            if aligned:
+                src = known_list[idx]
+            else:
+                src = known_by_url.get(u) or {}
             at = int((src or {}).get("expireAt") or 0)
             if src and at:
                 # ★ 只信 `expireAt` 这个绝对值：`expireDays` 是按查询时刻算的
                 #   相对天数，隔天再看就错了（用户报的「昨天 7 天今天还是 7 天」）。
                 #   所以这里一律用 PANS.refresh 按当前时间重算。
-                lk.update(PANS.refresh({
+                fresh = PANS.refresh({
                     "ok": bool(src.get("ok", True)),
                     "state": ("expired" if src.get("expired") else "ok"),
                     "text": str(src.get("expireText") or ""),
                     "expireAt": at,
-                }, now))
+                }, now)
+                lk.update(fresh)
                 # `_refresh` 用的是 `text`（panshare 内部字段名），
                 # 界面绑的是 `expireText`，这里对一下名字。
-                lk["expireText"] = str(lk.get("text") or src.get("expireText") or "")
+                lk["expireText"] = str(fresh.get("text") or src.get("expireText") or "")
             elif src:
-                # 兼容老数据：早期只存了相对天数、没有 expireAt 的，
-                # 保留原值显示（总比什么都不显示强），下次查询会补上 expireAt。
+                # 兼容老数据 / 非「有确切到期日」的情况（永久有效、已失效、查询失败）。
+                # ★ 这里也要给 `expireTag`：界面的角标**只认这一个字段**，
+                #   缺了就拿不到文字（以前「已失效」那条不显示就是这个原因）。
                 lk["expired"] = bool(src.get("expired"))
                 lk["expireText"] = str(src.get("expireText") or "")
                 lk["expireDays"] = int(src.get("expireDays") or 0)
                 lk["expireAt"] = 0
+                tag = PANS.expire_tag(
+                    0, now,
+                    expired=bool(src.get("expired")),
+                    gone=_looks_gone(lk["expireText"]))
+                lk["expireTag"] = tag["tag"]
+                lk["expireLevel"] = tag["level"]
+                lk["expireHours"] = tag["expireHours"]
             else:
                 lk.setdefault("expired", False)
                 lk.setdefault("expireText", "")
                 lk.setdefault("expireDays", 0)
+                lk.setdefault("expireTag", "")
+                lk.setdefault("expireLevel", "")
+                lk.setdefault("expireHours", 0)
                 lk.setdefault("expireAt", 0)
         return d
 
