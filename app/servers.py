@@ -1521,6 +1521,11 @@ class ServerManager(QObject):
                 # friends: 正在这台服务器上玩的好友昵称列表
                 # fromFriend: 这条是不是「因为好友在玩才加进来的」（非收藏）
                 "friends": [p["name"] for p in pals],
+                # friendAvatars: 和 friends **一一对应**的头像文件路径
+                #   （空串 = 这个好友还没抓到，界面画占位）。
+                #   ★ 用 list 而不是 map：好友重名很常见（Steam 昵称不唯一），
+                #     按名字建 map 会把两个不同的人合成一个。
+                "friendAvatars": [str(p.get("avatarPath") or "") for p in pals],
                 "friendCount": len(pals),
                 "fromFriend": False,
                 # 自动分类：先按「名字里的提示词」归类，猜不出再借 mode 的结论。
@@ -1572,6 +1577,7 @@ class ServerManager(QObject):
                 "modeLabel": live.get("modeLabel", "未知"),
                 "modeSource": live.get("modeSource", ""),
                 "friends": [p["name"] for p in pals],
+                "friendAvatars": [str(p.get("avatarPath") or "") for p in pals],
                 "friendCount": len(pals),
                 "fromFriend": True,
                 "category": (server_category(live.get("name", "")) or

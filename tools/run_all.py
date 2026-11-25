@@ -89,6 +89,7 @@ DEFAULT_SUITE = [
     "credit_test",
     "window_close_test",
     "friends_test",
+    "friend_avatar_test",
     "export_test",
     "onefile_paths_test",
     "servers_test",

@@ -235,12 +235,24 @@ def main():
     check("titleOf 对好友独有服给友好标题", "fromFriend" in body)
     check("titleOf 仍然优先用用户起的名字", 'row.name || ""' in body)
 
-    # 好友标签要**紧跟地址**，不能因为地址撑满一行被推到卡片中间
+    # 好友标签的位置。
+    #
+    # ★ 2026-11 又改了一次：标签从「地址右边」挪到「地址下面独立一行」
+    #   （用户：「放到 IP 右边不太协调，可以放到 IP 下面」）。
+    #   所以「地址按内容宽度排」这条老断言已经不成立了 —— 现在地址**独占一行、
+    #   撑满宽度**，标签在下一行。
     k = qml.find('objectName: "friendTag"')
     seg = qml[max(0, k - 1400):k] if k > 0 else ""
-    check("地址按内容宽度排（不再撑满一行）", "implicitWidth" in seg, "")
-    check("地址不再写 parent.width - 标签宽", "width: parent.width - (friendTag.visible"
-          not in seg, "仍是旧写法" if "width: parent.width - (friendTag.visible" in seg else "")
+    check("地址独占一行、撑满宽度（不再给右侧标签让位）",
+          "id: addrTxt" in seg and "width: parent.width" in seg)
+    check("地址不再写 parent.width - 标签宽",
+          "width: parent.width - (friendTag.visible" not in seg,
+          "仍是旧写法" if "width: parent.width - (friendTag.visible" in seg else "")
+    # 标签不该再锚在地址右边（那是上一版的位置）
+    tail = qml[k:k + 1500] if k > 0 else ""
+    check("好友标签不再锚在地址右边",
+          "anchors.left: addrTxt.right" not in tail,
+          "又挤回地址右边了")
 
     # 收藏入口：卡片星标 + 详情面板提示条
     check("卡片有「收藏」按钮", 'objectName: "srvCardSaveFriend"' in qml)

@@ -488,6 +488,35 @@ Item {
 
     // ---- 好友在玩 ----
 
+    // 这台服务器上「有头像」的好友，最多取几个（卡片上那一小条放不下更多）
+    readonly property int friendAvatarMax: 3
+    // 头像显示尺寸。24 是「熟人一眼能认出」的下限附近；
+    // 卡片高度（128）就是按这个尺寸算出来的，改这里要同步改卡片高度。
+    readonly property int friendAvatarSize: 24
+    // 叠压量：后一张压住前一张多少像素（0 = 并排不叠）
+    readonly property int friendAvatarOverlap: 6
+
+    // 取前 N 个有头像的：返回 [{path, name}, ...]
+    // ★ 要按 friends / friendAvatars 的**下标**配对，不能按名字找 ——
+    //   Steam 昵称不唯一，两个好友叫同一个名字是常事。
+    function friendAvatarList(row) {
+        var out = []
+        if (!row) return out
+        var names = row.friends || []
+        var paths = row.friendAvatars || []
+        for (var i = 0; i < names.length && out.length < page.friendAvatarMax; ++i) {
+            var p = String(paths[i] || "")
+            if (p.length > 0)
+                out.push({ path: p, name: String(names[i] || "") })
+        }
+        return out
+    }
+
+    // 有没有任何头像可画（决定标签里是画头像堆叠还是退回人形图标）
+    function hasFriendAvatar(row) {
+        return page.friendAvatarList(row).length > 0
+    }
+
     // 卡片上那个小标签的文字：「小明 在玩」/「小明 等 2 人在玩」
     // 名字太长就截断，卡片那一行放不下太多字。
     function friendTagText(row) {
@@ -3377,11 +3406,19 @@ Item {
                     width: srvList.width
                     // 高度 108：左侧四行（18+18+13+14 + 间距9 + 上下边距16 = 88），
                     // 右侧三块（人数 24 + 地图 14 + 信号行 12 + 间距 4 = 54）。
-                    // 高度 118 = 内容区 92 + 底部操作带 26。
+                    // 高度 140：左侧**五行**（18+18+13+14+24 + 间距 12 + 上下边距 12 = 111），
+                    // 右侧三块（人数 24 + 地图 14 + 信号行 12 + 间距 4 = 54）。
+                    //
+                    // ★ 为什么从 118 一路涨到 140：
+                    //   1. 12px 的头像认不出是谁（用户报的「太小了」），
+                    //      人眼能认出熟人的下限约 20px，24px 才稳；
+                    //   2. 好友标签原来挤在 IP **右边**，和地址抢同一行 ——
+                    //      头像一放大就很别扭（用户说「不太协调」）。
+                    //      挪到 IP **下面**单独一行，两边都舒展。
+                    //   代价是一屏少放一张卡（5 → 4），换来头像能认人。
+                    //
                     // ★ 底部必须留出 26px 给悬浮的快捷按钮（连接/分享/编辑/移出）。
-                    //   以前按钮直接压在卡片右下角，正好和「人数/地图/信号行」
-                    //   那一块重叠，鼠标一悬浮就互相盖住。
-                    height: 118
+                    height: 140
                     radius: Theme.radiusS
                     color: picked ? Qt.rgba(page.accent.r, page.accent.g, page.accent.b, 0.08)
                                   : (srvCard.hovered ? Theme.scrim(0.06) : Theme.scrim(0.035))
@@ -3644,67 +3681,140 @@ Item {
                             elide: Text.ElideRight
                         }
 
-                        // ---- 第 4 行：地址 +（有好友时）好友在那玩
+                        // ---- 第 4 行：地址
                         // 信号格 / 延迟 / 检查时间已经挪到**右侧数据区**的下面一行
                         // （见 bigInfo 里的信号行）。
-                        //
-                        // ★ 以前它们在这一行的右端，但这一行的父容器（leftCol）
-                        //   右边界是 bigInfo.left —— 也就是卡片**中间**，
-                        //   所以视觉上「延迟和时间停在中间」，并没有贴到卡片右侧。
-                        //   挪进 bigInfo 后就是真正贴着卡片右端了。
-                        Row {
+                        Text {
+                            id: addrTxt
                             width: parent.width
                             height: 14
-                            spacing: 8
+                            verticalAlignment: Text.AlignVCenter
+                            text: modelData.addr
+                            color: Theme.textMute
+                            font.family: Theme.monoFont
+                            font.pixelSize: 10
+                            elide: Text.ElideRight
+                        }
 
-                            Text {
-                                id: addrTxt
-                                // ★ 地址按**内容宽度**排，不要撑满一行。
-                                //   以前这里写的是 parent.width - 标签宽，
-                                //   地址本身只有 15 个字符、后面留一大片空白，
-                                //   好友标签就被推到了卡片**中间**，
-                                //   看起来压住了右边的内容、很不协调。
-                                //   现在让两者紧挨着排在左边。
-                                width: Math.min(implicitWidth, parent.width
-                                                - (friendTag.visible
-                                                   ? friendTag.width + 8 : 0))
-                                height: 14
-                                verticalAlignment: Text.AlignVCenter
-                                text: modelData.addr
-                                color: Theme.textMute
-                                font.family: Theme.monoFont
-                                font.pixelSize: 10
-                                elide: Text.ElideRight
-                            }
-
-                            // ---- 好友在玩标签（"小明 等 2 人在玩"）----
-                            // 只在 modelData.friends 非空时出现。
-                            // 这是这轮新增功能在卡片上的**唯一可见标记**：
-                            // 一眼就能看出「这台服里有我认识的人」。
-                            Rectangle {
-                                id: friendTag
-                                objectName: "friendTag"
-                                visible: (modelData.friends || []).length > 0
-                                height: 14
-                                width: visible ? (friendIcon.width
-                                                  + friendTxt.implicitWidth + 12) : 0
-                                radius: 7
-                                color: Qt.rgba(page.accent.r, page.accent.g,
-                                               page.accent.b, 0.18)
+                        // ---- 第 5 行：好友在玩标签（"小明 等 2 人在玩"）----
+                        //
+                        // ★ 从「IP 右边」挪到「IP 下面」独立成行（用户说的
+                        //   「放到 IP 右边不太协调」）。挤在地址右边时：
+                        //     · 头像一放大就把地址挤得很短；
+                        //     · 两者基线不同（等宽地址 vs 圆形头像），看着别扭。
+                        //   独立一行后地址能占满宽度，标签也有足够空间。
+                        //
+                        // ★ 只在 modelData.friends 非空时出现。
+                        //   有头像就画头像（24px 圆形，最多 3 个），
+                        //   没有就退回人形图标 —— 头像要 Steam 那头异步给，
+                        //   抓不到是很正常的状态，不能因此把整个标签藏掉。
+                        Rectangle {
+                            id: friendTag
+                            objectName: "friendTag"
+                            visible: (modelData.friends || []).length > 0
+                            readonly property var avatars: page.friendAvatarList(modelData)
+                            readonly property bool withAvatar: avatars.length > 0
+                            readonly property int avSize: page.friendAvatarSize
+                            // ★ 高度必须**跟着头像走**，不能写死 22：
+                            //   24px 的头像塞进 22px 高的胶囊里会上下溢出，
+                            //   圆角边上露出两个尖角。
+                            height: visible ? (withAvatar ? avSize + 4 : 22) : 0
+                            // 独立成行后可以放心用「内容宽」，仍有上限兜底
+                            width: visible
+                                   ? Math.min(friendRow.implicitWidth + 10,
+                                              parent.width)
+                                   : 0
+                            anchors.left: parent.left
+                            clip: true
+                            radius: height / 2
+                            color: Qt.rgba(page.accent.r, page.accent.g,
+                                           page.accent.b, 0.18)
                                 border.width: 1
                                 border.color: Qt.rgba(page.accent.r, page.accent.g,
                                                       page.accent.b, 0.42)
 
                                 Row {
-                                    anchors.centerIn: parent
-                                    spacing: 3
+                                    id: friendRow
+                                    // ★ 靠左对齐、不要 centerIn：
+                                    //   宽度被父级夹住时（名字太长），
+                                    //   居中的内容会往两边各溢出一半，
+                                    //   左边那一半就被 clip 掉 —— 头像看起来"被切了"。
+                                    //   靠左至少保证「完整的那个人」看得见。
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 5
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 5
 
+                                    // 头像堆叠：每张 24x24 圆形，后一张压前一张一点
+                                    Row {
+                                        spacing: -page.friendAvatarOverlap
+                                        visible: friendTag.withAvatar
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        Repeater {
+                                            model: friendTag.avatars
+                                            // ★ 头像是**在 Python 端就裁成圆形**的
+                                            //   （带抗锯齿 alpha），所以这里只管贴图。
+                                            //
+                                            //   以前试过在 QML 里做圆形：
+                                            //   · `Rectangle { radius: w/2; clip: true }`
+                                            //     的 clip 是**矩形**的（radius 只影响
+                                            //     背景绘制），图像四角会露出来 ——
+                                            //     截图里那些方块头像就是它；
+                                            //   · `OpacityMask` 要 `import Qt5Compat.
+                                            //     GraphicalEffects`，而它不在 PyInstaller
+                                            //     的 hiddenimports 里，打包容易漏文件。
+                                            //   在 Python 里裁一次，最省事也最稳。
+                                            delegate: Item {
+                                                required property var modelData
+                                                width: friendTag.avSize
+                                                height: friendTag.avSize
+
+                                                // 底：占位圆（图还没到 / 加载失败时可见）
+                                                Rectangle {
+                                                    anchors.fill: parent
+                                                    radius: width / 2
+                                                    color: Qt.rgba(page.accent.r,
+                                                                   page.accent.g,
+                                                                   page.accent.b, 0.25)
+                                                    border.width: 1
+                                                    border.color: Qt.rgba(
+                                                        page.accent.r,
+                                                        page.accent.g,
+                                                        page.accent.b, 0.55)
+                                                }
+
+                                                Image {
+                                                    id: avImg
+                                                    anchors.fill: parent
+                                                    source: modelData.path.startsWith("http")
+                                                            ? modelData.path
+                                                            : "file:///" + modelData.path.replace(/\\/g, "/")
+                                                    // PNG 自带圆形 alpha，直接拉伸即可
+                                                    fillMode: Image.PreserveAspectFit
+                                                    asynchronous: true
+                                                    cache: true
+                                                    // ★ 解码尺寸略大于显示尺寸（2 倍），
+                                                    //   高分屏 / 缩放时也不糊。steam 给的就是
+                                                    //   64x64，够用。
+                                                    sourceSize.width: Math.round(
+                                                        friendTag.avSize * 2)
+                                                    sourceSize.height: Math.round(
+                                                        friendTag.avSize * 2)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 没头像时的人形图标（回退）
+                                    // ★ 也要跟着放大：以前是 9px，摆在 24px 的头像旁边
+                                    //   会显得「标签里一半大一半小」，很别扭。
                                     Text {
                                         id: friendIcon
+                                        visible: !friendTag.withAvatar
                                         text: "\uE748"   // 人形图标
                                         color: page.accent
                                         font.family: Theme.iconFont
-                                        font.pixelSize: 9
+                                        font.pixelSize: 13
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
                                     Text {
@@ -3712,7 +3822,8 @@ Item {
                                         text: page.friendTagText(modelData)
                                         color: page.accent
                                         font.family: Theme.uiFont
-                                        font.pixelSize: 9
+                                        // 头像大了，文字也跟着提一档，否则比例失衡
+                                        font.pixelSize: 11
                                         font.weight: Font.DemiBold
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
@@ -3727,7 +3838,6 @@ Item {
                                     onClicked: page.showFriendNames(modelData)
                                 }
                             }
-                        }
 
                     }
 

@@ -54,7 +54,7 @@ import threading
 import time
 from typing import Any
 
-from .util import Log
+from .util import DATA_DIR, Log
 
 log = Log("steamfriends.log")
 
@@ -72,6 +72,21 @@ LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
 
 # 缓存多久。好友状态变得不算快，60 秒足够，也避免频繁调 DLL。
 CACHE_TTL = 60.0
+
+# ---------------------------------------------------------------- 好友头像
+#
+# ★ 为什么单独缓存到磁盘：Steam 的头像是**异步下载**的。
+#   第一次问 `GetMediumFriendAvatar()` 常常返回 0（服务器端还没把图传下来），
+#   要隔一会儿再问才有。如果每次 `fetch()` 都去重试，一次刷新就要多等好几秒。
+#
+#   所以策略是：
+#     1. 先把**上次存下来的 PNG** 当头像（立即可用，界面不闪）；
+#     2. 后台顺手再问一次 Steam，拿到新句柄就覆盖文件（下次刷新就更新了）。
+#
+#   这样「好友列表」永远是快的，头像最坏情况是「差一次刷新」。
+AVATAR_SUBDIR = "avatar"      # 落在 DATA_DIR/cache/avatar/ 下
+# 头像句柄重试：间隔（秒）与次数。steam 那边慢的时候 2~3 次才回来。
+AVATAR_RETRY = (0.0, 0.35, 0.9, 1.8, 3.0)
 
 _lock = threading.Lock()
 _cache: dict[str, Any] = {"at": 0.0, "data": None, "err": ""}
@@ -211,6 +226,10 @@ class _Steam:
         self._rel_user = None
         self._rel_pipe = None
         self.err = ""
+        # 头像相关（首次用到时才初始化，失败就安静降级）
+        self.api_handle = None
+        self._utils = None
+        self._av_ready = False
 
     def open(self) -> bool:
         root = _steam_root()
@@ -242,6 +261,7 @@ class _Steam:
         if not ha:
             self.err = "steam_api64.dll 加载失败（位数不对或版本不兼容）"
             return False
+        self.api_handle = ha
 
         def sym(name: str):
             p = k32.GetProcAddress(ha, name.encode())
@@ -365,6 +385,142 @@ class _Steam:
             })
         return out
 
+    # ------------------------------------------------------------ 好友头像
+    #
+    # ★ 链路（Steamworks 的既定做法，已实测）：
+    #     1. ISteamFriends::GetMediumFriendAvatar(sid) → int 句柄（图片 ID，不是像素）
+    #     2. ISteamUtils::GetImageSize(句柄, &w, &h)
+    #     3. ISteamUtils::GetImageRGBA(句柄, buf, w*h*4) → BGRA
+    #
+    # ★★ 两个坑：
+    #   · 头像是**异步下载**的，第一次问常常返回 0，要重试几次（AVATAR_RETRY）；
+    #   · `ISteamUtils` 不在 ISteamFriends 上，要从 ISteamClient 的虚表拿，
+    #     而且**槽位实测是 12，不是文档顺序的 9**（按 9 会 access violation）。
+    #     这个值跟 SteamClient interface 版本有关，换版本可能要重测。
+    _UTILS_VT_SLOT = 12
+
+    def _init_utils(self) -> bool:
+        """取 ISteamUtils（拿头像像素必须它）。取不到就让头像功能安静降级。"""
+        if getattr(self, "_utils", None):
+            return True
+        if not (self.client and self.pipe and self.user):
+            return False
+        try:
+            vt = ctypes.cast(
+                ctypes.cast(self.client, ctypes.POINTER(ctypes.c_void_p))[0],
+                ctypes.POINTER(ctypes.c_void_p))
+            getter = ctypes.CFUNCTYPE(
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                ctypes.c_char_p)(vt[self._UTILS_VT_SLOT])
+            for name in (b"SteamUtils010", b"SteamUtils009"):
+                obj = getter(self.client, self.user, self.pipe, name)
+                if obj:
+                    self._utils = obj
+                    break
+        except Exception as e:  # noqa: BLE001  虚表槽位不对会崩/抛，都当没有
+            log(f"get ISteamUtils failed: {e!r}")
+            self._utils = None
+        return bool(getattr(self, "_utils", None))
+
+    def _avatar_funcs(self) -> bool:
+        """从 steam_api64.dll 取头像相关的三个导出。"""
+        if getattr(self, "_av_ready", False):
+            return True
+        if not self.api_handle:
+            return False
+
+        def sym(name: str):
+            p = self.k32.GetProcAddress(self.api_handle, name.encode())
+            if not p:
+                raise AttributeError(name)
+            return p
+
+        try:
+            self._av_medium = ctypes.CFUNCTYPE(
+                ctypes.c_int, ctypes.c_void_p, ctypes.c_uint64)(
+                sym("SteamAPI_ISteamFriends_GetMediumFriendAvatar"))
+            self._img_size = ctypes.CFUNCTYPE(
+                ctypes.c_bool, ctypes.c_void_p, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint32))(
+                sym("SteamAPI_ISteamUtils_GetImageSize"))
+            self._img_rgba = ctypes.CFUNCTYPE(
+                ctypes.c_bool, ctypes.c_void_p, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_ubyte), ctypes.c_int)(
+                sym("SteamAPI_ISteamUtils_GetImageRGBA"))
+            self._av_ready = True
+        except (AttributeError, OSError) as e:
+            log(f"avatar exports missing: {e!r}")
+            self._av_ready = False
+        return bool(getattr(self, "_av_ready", False))
+
+    def read_avatar_png(self, sid: int) -> bytes:
+        """拿一个好友的 64x64 头像 PNG 字节（拿不到返回空 bytes）。
+
+        重试几次是因为 Steam 那头是异步下载的；退避间隔见 AVATAR_RETRY。
+        """
+        if not self._init_utils() or not self._avatar_funcs():
+            return b""
+        handle = 0
+        for delay in AVATAR_RETRY:
+            if delay:
+                time.sleep(delay)
+            try:
+                handle = self._av_medium(self.friends, sid)
+            except Exception:  # noqa: BLE001
+                handle = 0
+            if handle:
+                break
+        if not handle:
+            return b""
+        w = ctypes.c_uint32(0)
+        h = ctypes.c_uint32(0)
+        try:
+            if not self._img_size(self._utils, handle,
+                                  ctypes.byref(w), ctypes.byref(h)):
+                return b""
+            if not w.value or not h.value or w.value > 512 or h.value > 512:
+                return b""
+            n = w.value * h.value * 4
+            buf = (ctypes.c_ubyte * n)()
+            if not self._img_rgba(self._utils, handle, buf, n):
+                return b""
+        except Exception as e:  # noqa: BLE001
+            log(f"avatar pixels failed for {sid}: {e!r}")
+            return b""
+        # BGRA → PNG。用 Pillow（项目已经依赖它），转一下再落盘，
+        # 这样 QML 的 Image 直接能读，也不用在前端做通道交换。
+        #
+        # ★ 顺手裁成**圆形**（带抗锯齿的 alpha）。
+        #   为什么在 Python 这边裁、而不是 QML 里 mask：
+        #     · `Rectangle { radius: w/2; clip: true }` 的 clip 是**矩形**的，
+        #       radius 只影响背景绘制 —— 图像四角会露出来（实测截图里就是
+        #       方块头像）；
+        #     · 用 `OpacityMask` 得额外 import Qt5Compat.GraphicalEffects，
+        #       而它不在 PyInstaller 的 hiddenimports 里，打包容易漏文件；
+        #     · 这里裁一次、落盘，之后 QML 只是贴一张早就圆好的图，
+        #       最省事也最不容易在别人机器上出岔子。
+        try:
+            import io as _io
+
+            from PIL import Image, ImageDraw
+
+            img = Image.frombuffer("RGBA", (w.value, h.value), bytes(buf),
+                                   "raw", "BGRA", 0, 1).convert("RGBA")
+            # 4 倍超采样画圆形遮罩，边缘不锯齿
+            ss = 4
+            mask = Image.new("L", (w.value * ss, h.value * ss), 0)
+            ImageDraw.Draw(mask).ellipse(
+                (0, 0, w.value * ss - 1, h.value * ss - 1), fill=255)
+            mask = mask.resize((w.value, h.value), Image.LANCZOS)
+            img.putalpha(mask)
+            out = _io.BytesIO()
+            img.save(out, format="PNG")
+            return out.getvalue()
+        except Exception as e:  # noqa: BLE001
+            log(f"avatar encode failed for {sid}: {e!r}")
+            return b""
+
     def close(self) -> None:
         try:
             if self.user and self.client and self._rel_user:
@@ -401,6 +557,110 @@ def _is_private(ip: int) -> bool:
     return False
 
 
+def _avatar_dir() -> str:
+    """头像缓存目录（`data/cache/avatar/`）。"""
+    p = os.path.join(DATA_DIR, "cache", AVATAR_SUBDIR)
+    try:
+        os.makedirs(p, exist_ok=True)
+    except OSError:
+        pass
+    return p
+
+
+def _avatar_cached(sid: str) -> str:
+    """已经存下来的头像文件路径（没有就是空串）。"""
+    if not sid:
+        return ""
+    p = os.path.join(_avatar_dir(), f"{sid}.png")
+    try:
+        if os.path.isfile(p) and os.path.getsize(p) > 64:
+            return p
+    except OSError:
+        pass
+    return ""
+
+
+def _avatar_store(sid: str, png: bytes) -> str:
+    """把头像 PNG 落盘，返回路径（失败返回空串）。"""
+    if not sid or not png:
+        return ""
+    path = os.path.join(_avatar_dir(), f"{sid}.png")
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(png)
+        os.replace(tmp, path)
+        return path
+    except OSError as e:
+        log(f"store avatar failed {sid}: {e!r}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return ""
+
+
+def _fetch_avatars(sess: _Steam, friends: list[dict]) -> None:
+    """给好友列表补上 `avatarPath`（原地改）。
+
+    ★ 只为「正在玩 L4D2」的好友抓头像 —— 服务器列表里只显示这些人的头像，
+      给全部 33 个好友都抓一遍要等十几秒，纯属浪费。
+
+    ★ 先用**磁盘里已有的**当结果（本次立即可用），再顺手问一次 Steam：
+      拿到新的就覆盖文件。这样界面永远不等人，最新头像最多「差一次刷新」。
+    """
+    for f in friends:
+        sid = str(f.get("sid") or "")
+        if not sid:
+            continue
+        cached = _avatar_cached(sid)
+        if cached:
+            f["avatarPath"] = cached
+        if not f.get("playingL4D2"):
+            continue        # 只给「在玩」的抓，省时间
+        try:
+            png = sess.read_avatar_png(int(sid))
+        except Exception as e:  # noqa: BLE001  头像失败不能影响好友列表
+            log(f"avatar fetch failed {sid}: {e!r}")
+            continue
+        if png:
+            path = _avatar_store(sid, png)
+            if path:
+                f["avatarPath"] = path
+
+
+def _prune_avatars(keep_sids: set[str]) -> None:
+    """删掉不在好友列表里的头像文件。
+
+    ★ 为什么要清：好友删了、或者换了 Steam 账号，旧头像就永远没人用了。
+      一个文件才几 KB，但这类「只增不减」的目录两年后能堆出几千个，
+      而且没人知道它们是什么。既然每次 fetch 都能拿到当前好友列表，
+      顺手对一遍账最省事。
+
+    ★ 用 `keep` 白名单而不是按年龄删：头像的价值和「多久没更新」无关
+      （一个半年没换头像的好友，头像依然是对的）。
+    """
+    d = _avatar_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    removed = 0
+    for name in names:
+        if not name.endswith(".png"):
+            continue
+        stem = name[:-4]
+        if stem in keep_sids:
+            continue
+        try:
+            os.remove(os.path.join(d, name))
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        log(f"pruned {removed} stale avatars")
+
+
 def fetch(force: bool = False) -> dict:
     """读好友状态（带缓存）。
 
@@ -433,6 +693,16 @@ def fetch(force: bool = False) -> dict:
                 return data
             me = s.my_name()
             friends = s.read_friends()
+            # 头像：先贴磁盘缓存的，再顺手补「在玩」的那几个（失败不影响列表）
+            try:
+                _fetch_avatars(s, friends)
+            except Exception as e:  # noqa: BLE001
+                log(f"avatar pass failed: {e!r}")
+            # 顺手把「已经不是好友」的头像清掉（只增不减会堆垃圾）
+            try:
+                _prune_avatars({str(f.get("sid") or "") for f in friends})
+            except Exception as e:  # noqa: BLE001
+                log(f"avatar prune failed: {e!r}")
             data = {"ok": True, "error": "", "me": me, "friends": friends,
                     "at": now}
             _cache.update(at=now, data=data, err="")
