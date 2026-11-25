@@ -1681,6 +1681,57 @@ https://pan.baidu.com/s/1P9uaqDEDMoSoqHDANKINGW50iJHyw?pwd=62nx
 直接跳浏览器了。三处现在都用同一个形状正则，`tools/panfix2_test.py`
 会同时检查 Python 和 QML 两侧的行为一致。
 
+### 蓝奏云文件夹分享（`/bXXXX`）
+
+用户报：「一直显示文件夹无法下载」，给的例子是
+`https://wwbiy.lanzoue.com/b013a7etzg`（码 `mcbl`）。
+
+以前这里是**主动拒绝**的：一看到 `filemoreajax.php` 就返回
+「这是一个文件夹分享…请在浏览器打开，挑需要的那个下载」。
+现在两步走，能把里面的文件列出来并真的下下来。
+
+#### 文件夹分享是另一套接口
+
+| 环节 | 单文件分享 | 文件夹分享 |
+| --- | --- | --- |
+| 列表 | 无 | `POST /filemoreajax.php?file=<fid>`，参数 `lx/fid/uid/puid/t/k/up/ls/rep/pg/pwd` |
+| 提取码 | 密码页表单里 | **只在列表接口用** |
+| 下载页 | `/<duan>` 或分享页本身 | `/<id>`，`id` 里已经带了 `?webpage=<puid>` |
+| 提交字段 | `websign: ""`，密码页带 `p` | **`websign: "2"`，绝对不能带 `p`** |
+
+两个坑都是实测踩出来的：
+
+1. **`filemoreajax` 的那堆参数每个分享都不一样**，只能从页面里那个
+   `$.ajax({ data: {...} })` 块抠出来（`_folder_params()`）。写死任何一个
+   都会让别的分享打不开。
+2. **文件夹里的文件页是免密的**。它的表单要 `websign: "2"`；而
+   `websign: ""` 或者带上 `p`（提取码）都会稳定返回
+   `{"zt":0,"inf":"密码错误"}`。表现出来就是「提取码明明是对的却说密码错误」。
+
+`/fn?...`（iframe）里的表单长这样，可以直接对照：
+
+```js
+$.ajax({ url: dom_ajaxs,
+  data: { 'action':'downprocess','websignkey':ajaxdata,'signs':ajaxdata,
+          'sign':wp_sign,'websign':'2','kd':kdns,'ves':1 },
+```
+
+注意里面**没有 `p`** 这个字段 —— 这就是它和单文件下载的区别。
+
+#### 现在的行为
+
+- `list_folder()` 分页把文件列全（`pg` 递增，`pgs` 是总页数），
+  脏数据（没有 `id` 的条目）跳过而不是让整页失败；
+- 文件夹里的文件逐条拼好 `page_url`，`_resolve_file_page()` 取直链；
+- `resolve_lanzou()` 对外仍然只有一个入口：遇到文件夹就解析**第一个**文件，
+  并在返回值里带上 `folder: true` / `folderCount` / `folderFiles`，
+  下载任务那边会提示「文件夹分享（共 N 个），本次取：xxx；还有 …」——
+  不然用户会以为「怎么只下了一个」。
+
+> 回归：`tools/lanzou_folder_test.py`。离线段验参数抠取、多文件分页、
+> 脏数据跳过、提取码错误的转述；联网段用用户那条真实链接跑通
+> 「列文件 → 取直链 → 真的拉到 `Rar!` 开头的字节」。
+
 ---
 
 ### 百度网盘分享过期检测

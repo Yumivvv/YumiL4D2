@@ -97,6 +97,7 @@ DEFAULT_SUITE = [
     "round16_test",
     "round17_test",
     "lanzou_test",
+    "lanzou_folder_test",
     "panfix_test",
     "panfix2_test",
     "expire_days_test",

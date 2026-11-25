@@ -169,14 +169,20 @@ def main() -> int:
     check("title 只有「文件」不当名字", LZ._page_meta("<title>文件</title>")[0] == "")
 
     print("\n-- 9. 「解析不了」的形态都说清楚", flush=True)
+    # ★ 2026-11 起「文件夹分享」不再是「解析不了」的形态了 ——
+    #   现在会真的把里面的文件列出来并解析第一个（见 list_folder）。
+    #   所以这里改盯「确实支持了」，而不是「会提示去浏览器」。
     for kw, why in (
-        ("filemoreajax.php", "文件夹分享 → 让用户去浏览器挑"),
         ("分享页是空的", "空壳页 → 提取码错/分享失效"),
         ("提取码不对", "密码错误 → 转述蓝奏云原话"),
         ("needManual", "带 needManual，界面能引导"),
         ("没找到下载框", "页面结构变了 → 明确说"),
     ):
         check(f"有「{why}」", kw in src)
+    check("文件夹分享现在会列文件", "def list_folder(" in src)
+    check("文件夹里的文件能解析直链", "def _resolve_file_page(" in src)
+    check("文件夹内文件用 websign='2' 且不带提取码",
+          '"websign": "2"' in src)
 
     print("\n-- 10. 下载", flush=True)
     check("有 download_direct", hasattr(LZ, "download_direct"))

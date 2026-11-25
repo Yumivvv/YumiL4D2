@@ -801,6 +801,24 @@ class DownloadManager(QObject):
         if not direct:
             return {"ok": False, "error": "没拿到直链"}
 
+        # ---- 文件夹分享：顺手把「里面有 N 个，这次取的是哪个」说清楚 ----
+        # 蓝奏云的 /bXXXX 分享是一个文件夹。程序现在能解析（以前直接拒绝），
+        # 但一次只能下一个文件 —— 不说清楚的话，用户以为「怎么只下了一个」。
+        if res.get("folder"):
+            cnt = int(res.get("folderCount") or 0)
+            picked = str(res.get("filename") or "")
+            names = [str(x.get("name") or "")
+                     for x in (res.get("folderFiles") or [])]
+            note = f"文件夹分享（共 {cnt} 个），本次取：{picked}"
+            if cnt > 1:
+                rest = [n for n in names[1:4] if n]
+                if rest:
+                    note += "；还有 " + "、".join(rest)
+                    if cnt > 4:
+                        note += f" 等 {cnt - 1} 个"
+            self._set_task_note(task, note)
+            _log(f"pan folder: {url} -> {picked} ({cnt} files)")
+
         # ---- 先判断这是不是 MOD 文件 ----
         # 蓝奏云上绝大多数「求生之路2 资源」其实是 .vpk。这种不该丢到 downloads/pan
         # 让用户再手动搬一次 —— 直接落到 addons 目录，MOD 管理器扫一下就能用。

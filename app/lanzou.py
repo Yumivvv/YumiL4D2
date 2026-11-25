@@ -426,6 +426,241 @@ def _safe_filename(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 4.5 文件夹分享（/bXXXX 那种，里面好几个文件）
+#
+# 蓝奏云的**文件夹分享**和单文件分享是两套页面：
+#   · 单文件：有 iframe 下载框，`downprocess` 直接换中转地址；
+#   · 文件夹：页面上是 `filemoreajax.php` 分页列文件，每个文件带
+#     `name_all`（显示名）/ `size` / `duan`（短 ID）/ `id`（完整 ID + puid）。
+#
+# 以前这里直接返回「这是文件夹，请去浏览器手动下载」—— 用户报的就是这个。
+# 现在两步走：
+#   1. `list_folder()` 用 filemoreajax 把文件列出来；
+#   2. 每个文件的真实下载页是 `/<id>`（id 里已经带了 `?webpage=<puid>`），
+#      它的 iframe 表单参数和单文件**不一样**：`websign` 是 `"2"`，
+#      而且**不能带 `p`（提取码）** —— 带了就会报「密码错误」。
+#      文件夹的提取码只在第 1 步的 filemoreajax 里用。
+# ---------------------------------------------------------------------------
+
+def _folder_params(page: str) -> dict:
+    """从文件夹分享页里抠出 filemoreajax 需要的全部参数。
+
+    页面上的调用长这样（一个 ajax 块，参数写死在 data 里）::
+
+        url : '/filemoreajax.php?file=14298956',
+        data : { 'lx':2, 'fid':14298956, 'uid':'4608611',
+                 'puid':'VGBW…', 'pg':pgs, 'rep':'0',
+                 't':ibjr7n, 'k':_hi39g, 'up':1, 'ls':1, 'pwd':pwd }
+
+    这些参数每个分享都不一样，不能写死，只能从页面里读。
+    """
+    out: dict = {}
+    m = re.search(r"url\s*:\s*'(/filemoreajax\.php\?file=\d+)'", page)
+    if not m:
+        m = re.search(r"url\s*:\s*\"(/filemoreajax\.php\?file=\d+)\"", page)
+    if not m:
+        return {}
+    out["_api"] = m.group(1)
+    # 只取 data 那一段，避免把页面上别的数字误读成参数
+    dm = re.search(r"data\s*:\s*\{(.*?)\}", page, re.S)
+    block = dm.group(1) if dm else page
+    for key in ("lx", "fid", "uid", "puid", "rep", "up", "ls"):
+        mm = re.search(rf"'{key}'\s*:\s*'?([^,'\n}}]+)'?", block)
+        if mm:
+            out[key] = mm.group(1).strip().strip("'\"")
+    # t / k 是页面里的两个 js 变量
+    t_val = _js_var(page, "ibjr7n") or _js_var(page, "t")
+    if t_val:
+        out["t"] = t_val
+    k_val = _js_var(page, "_hi39g") or _js_var(page, "k")
+    if k_val:
+        out["k"] = k_val
+    return out
+
+
+def list_folder(url: str, password: str = "", timeout: int = 25,
+                max_pages: int = 20) -> dict:
+    """列出一个**文件夹分享**里的所有文件。
+
+    返回 ``{ok, files: [{name, size_text, duan, id}], error}``。
+    `id` 后面还要拼 `?webpage=<puid>` 才能当下载页地址 —— 这里已经替它拼好了
+    （存成 `page_url`），调用方直接用就行。
+    """
+    url = clean_lanzou_url(url)
+    if not url or not is_lanzou(url):
+        return {"ok": False, "files": [], "error": "不是蓝奏云的链接"}
+    origin = "{0.scheme}://{0.netloc}".format(urllib.parse.urlparse(url))
+    sess = _Session()
+
+    page = sess.get_text(url, timeout=timeout)
+    if not page:
+        return {"ok": False, "files": [], "error": "打不开分享页（网络不通或链接失效）"}
+    if "filemoreajax" not in page and "infomores" not in page:
+        return {"ok": False, "files": [],
+                "error": "这不是文件夹分享（没有文件列表接口）"}
+
+    params = _folder_params(page)
+    if not params.get("_api"):
+        return {"ok": False, "files": [], "error": "文件夹页解析失败（找不到列表接口）"}
+    api_path = params.pop("_api")
+    api = origin + api_path
+
+    files: list[dict] = []
+    seen: set[str] = set()
+    total_pages = 1
+    for pg in range(1, max_pages + 1):
+        data = dict(params)
+        data["pg"] = pg
+        data["pwd"] = str(password or "")
+        body = urllib.parse.urlencode(data).encode()
+        st, resp, _loc = _request(
+            api, data=body, timeout=timeout,
+            cookie=(f"acw_sc__v2={sess.cookie}" if sess.cookie else ""),
+            referer=url, ajax=True)
+        if st == 0 or not resp:
+            return {"ok": False, "files": files, "error": "取文件列表失败（网络不通）"}
+        if _is_waf_challenge(resp):
+            ck = _solve_acw(resp)
+            if ck:
+                sess.cookie = ck
+                st, resp, _loc = _request(
+                    api, data=body, timeout=timeout,
+                    cookie=f"acw_sc__v2={sess.cookie}",
+                    referer=url, ajax=True)
+        try:
+            js = json.loads(resp)
+        except ValueError:
+            return {"ok": False, "files": files,
+                    "error": f"文件列表解析失败：{str(resp)[:80]}"}
+        if str(js.get("zt")) != "1":
+            info = str(js.get("info") or "")
+            if "密码" in info:
+                return {"ok": False, "files": [],
+                        "error": f"提取码不对（蓝奏云说：{info}）"}
+            if files:
+                break            # 已经拿到一部分，后续页失败就不强求
+            return {"ok": False, "files": [],
+                    "error": f"蓝奏云拒绝了文件列表请求：{info or '未知原因'}"}
+
+        rows = js.get("text") or []
+        if isinstance(rows, dict):
+            rows = [rows]
+        for it in rows:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("name_all") or it.get("name") or "").strip()
+            fid = str(it.get("id") or "").strip()
+            if not name or not fid or fid in seen:
+                continue
+            seen.add(fid)
+            files.append({
+                "name": name,
+                "size_text": str(it.get("size") or "").strip(),
+                "duan": str(it.get("duan") or "").strip(),
+                # id 里已经带了 ?webpage=…，直接拼在 origin 后面就是下载页
+                "page_url": f"{origin}/{fid.lstrip('/')}",
+            })
+
+        # 还有没有下一页：页面里 `pgs` 是总页数（也可能写在返回里）
+        try:
+            total_pages = int(js.get("pgs") or params.get("pgs") or 0) or total_pages
+        except (TypeError, ValueError):
+            pass
+        pm = re.search(r"pgs\s*=\s*(\d+)", page)
+        if pm:
+            total_pages = int(pm.group(1))
+        if pg >= total_pages or not rows:
+            break
+
+    if not files:
+        return {"ok": False, "files": [], "error": "这个文件夹里没有文件（或者是空的）"}
+    return {"ok": True, "files": files, "error": ""}
+
+
+def _resolve_file_page(page_url: str, timeout: int = 25) -> dict:
+    """解析「文件夹内某个文件的下载页」→ CDN 直链。
+
+    ★ 和单文件的区别（实测踩出来的）：
+      · 文件夹里的文件页，iframe 表单的 `websign` 是 **"2"**，不是空串；
+      · **不能带 `p`（提取码）**，带了必然回「密码错误」——
+        文件夹的提取码只在 filemoreajax 那一步用，文件页本身是免密的。
+    """
+    origin = "{0.scheme}://{0.netloc}".format(urllib.parse.urlparse(page_url))
+    sess = _Session()
+    page = sess.get_text(page_url, timeout=timeout)
+    if not page:
+        return {"ok": False, "error": "下载页打不开"}
+
+    filename, size_text = _page_meta(page)
+
+    m = re.search(r'<iframe[^>]*src="([^"]+)"', page, re.I)
+    if not m:
+        return {"ok": False, "filename": filename, "sizeText": size_text,
+                "error": "下载页里没找到下载框（页面结构可能变了）"}
+    fn_url = urllib.parse.urljoin(origin + "/", html.unescape(m.group(1)))
+    fn_page = sess.get_text(fn_url, referer=page_url, timeout=timeout)
+    if not fn_page:
+        return {"ok": False, "filename": filename, "sizeText": size_text,
+                "error": "下载框打不开"}
+
+    wp_sign = _js_var(fn_page, "wp_sign")
+    ajaxdata = _js_var(fn_page, "ajaxdata") or "jbEo"
+    ajax_url = _find_ajax_url(fn_page, origin)
+    if not wp_sign or not ajax_url:
+        return {"ok": False, "filename": filename, "sizeText": size_text,
+                "error": "下载页解析失败（找不到 wp_sign / 接口地址）"}
+
+    # ★ websign 固定 "2"、且不带 p —— 这就是文件夹内文件的正确提交方式
+    post_data = {"action": "downprocess", "websignkey": ajaxdata,
+                 "signs": ajaxdata, "sign": wp_sign, "websign": "2",
+                 "kd": "1", "ves": "1"}
+    body_bytes = urllib.parse.urlencode(post_data).encode()
+    st, resp, _loc = _request(
+        ajax_url, data=body_bytes, timeout=timeout,
+        cookie=(f"acw_sc__v2={sess.cookie}" if sess.cookie else ""),
+        referer=fn_url, ajax=True)
+    if st == 0:
+        return {"ok": False, "filename": filename, "sizeText": size_text,
+                "error": "取中转地址失败（网络不通）"}
+    if _is_waf_challenge(resp):
+        ck = _solve_acw(resp)
+        if ck:
+            sess.cookie = ck
+            st, resp, _loc = _request(
+                ajax_url, data=body_bytes, timeout=timeout,
+                cookie=f"acw_sc__v2={sess.cookie}", referer=fn_url, ajax=True)
+    try:
+        data = json.loads(resp)
+    except ValueError:
+        return {"ok": False, "filename": filename, "sizeText": size_text,
+                "error": f"取中转地址失败：{str(resp)[:80]}"}
+    if str(data.get("zt")) != "1":
+        inf = str(data.get("inf") or "")
+        return {"ok": False, "filename": filename, "sizeText": size_text,
+                "error": f"蓝奏云拒绝了这次请求：{inf or '未知原因'}"}
+
+    dom = str(data.get("dom") or "").rstrip("/")
+    mid = str(data.get("url") or "").lstrip("/")
+    if not dom or not mid:
+        return {"ok": False, "filename": filename, "sizeText": size_text,
+                "error": "没拿到中转地址"}
+    relay = f"{dom}/file/{mid}"
+
+    sess.get_text(relay, referer=origin, timeout=timeout)
+    loc = sess.head_location(relay, referer=origin, timeout=timeout)
+    if not loc:
+        return {"ok": False, "filename": filename, "sizeText": size_text,
+                "error": "没拿到最终跳转地址，请稍后再试"}
+    final = urllib.parse.urljoin(relay, loc)
+    if not filename:
+        q = urllib.parse.urlparse(final)
+        fn = urllib.parse.parse_qs(q.query).get("fn", [""])[0]
+        filename = fn or urllib.parse.unquote(os.path.basename(q.path))
+    return {"ok": True, "url": final, "filename": filename,
+            "sizeText": size_text, "error": ""}
+
+
+# ---------------------------------------------------------------------------
 # 5. 主流程
 # ---------------------------------------------------------------------------
 def resolve_lanzou(url: str, password: str = "", timeout: int = 25) -> dict:
@@ -452,13 +687,31 @@ def resolve_lanzou(url: str, password: str = "", timeout: int = 25) -> dict:
 
     filename, size_text = _page_meta(page)
 
-    # ---- 已知的「解析不了」形态，先认出来，别白跑 ----
+    # ---- 文件夹分享：列出来，解析第一个文件（多个文件由界面自己挑）----
     if "filemoreajax.php" in page or ("folder" in page and "infomores" in page):
-        return {"ok": False, "url": "", "filename": filename, "size": 0,
-                "sizeText": size_text, "needManual": True,
-                "error": "这是一个文件夹分享（里面有好几个文件），"
-                         "程序只能解析单个文件的直链。"
-                         "请在浏览器打开，挑需要的那个下载"}
+        fl = list_folder(url, password=password, timeout=timeout)
+        if not fl.get("ok"):
+            return {"ok": False, "url": "", "filename": filename, "size": 0,
+                    "sizeText": size_text, "needManual": True,
+                    "error": fl.get("error") or "这个文件夹分享打不开"}
+        files = fl.get("files") or []
+        first = files[0]
+        one = _resolve_file_page(first["page_url"], timeout=timeout)
+        if not one.get("ok"):
+            return {"ok": False, "url": "", "filename": first["name"],
+                    "size": 0, "sizeText": first.get("size_text") or size_text,
+                    "needManual": True,
+                    "error": f"文件夹里的「{first['name']}」解析失败："
+                             + (one.get("error") or "未知原因")}
+        return {"ok": True, "url": one["url"],
+                "filename": one.get("filename") or first["name"],
+                "size": 0,
+                "sizeText": one.get("sizeText") or first.get("size_text") or "",
+                "error": "", "verified": True,
+                # ★ 让调用方知道「这是文件夹里的第一个」，界面可以提示用户
+                "folder": True, "folderCount": len(files),
+                "folderFiles": [{"name": f["name"], "sizeText": f["size_text"],
+                                 "pageUrl": f["page_url"]} for f in files]}
     if len(page) < 1600 and not filename and not _is_waf_challenge(page):
         hint = "（提取码可能不对）" if password else "（这个分享要提取码）"
         return {"ok": False, "url": "", "filename": "", "size": 0,
