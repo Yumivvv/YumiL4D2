@@ -224,7 +224,10 @@ def main():
         #   现在 expireDays 只在「≥24 小时」时才是正数，<24 小时一律 0、
         #   由 expireTag 去说「N 小时后到期」。见 tools/expire_days_test.py 第 7b 节。
         ("不足 24 小时（明天中午）", _at_day(1), "ok", 0),
-        ("今天 23 点（几小时后）", _at_day(0, 23), "ok", 0),
+        # ★ 这里以前写的是「今天 23 点」。23:00 之后跑测试时它已经**过期**了，
+        #   于是这条会变成墙钟依赖的假失败（实测 23:56 跑就红）。
+        #   要表达的是「几小时后、但不足 24 小时」，所以直接用 now + 6 小时。
+        ("6 小时后（不足 24 小时）", int(now2) + 6 * 3600, "ok", 0),
     ):
         got = PS._judge(ts, now2)
         check(f"_judge {label:20s}", got.get("state") == want_state
