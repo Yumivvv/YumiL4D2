@@ -154,9 +154,25 @@ def main() -> int:
     check("有内容的自建分类出现在侧边栏", key_del in cats, str(cats))
 
     # ---------------------------------------------------- 2. 新建按钮
-    print("=== 2. 「+ 新建」点得动 ===")
+    print("=== 2. 「+ 新建」点得动，而且没走出侧边栏 ===")
     newbtn = find_item(win, "modCatNewBtn")
     check("找得到「+ 新建」", newbtn is not None)
+    if newbtn is not None:
+        # ★ 用户报过「新建按钮走出 UI 外面」：原来标题行用
+        #   `Row + leftPadding 8 + 弹性 Item(width-68)`，
+        #   8 + 文字 + 80 + 52 超过 sideCol.width(148)，
+        #   按钮右边界顶到 416（侧栏只到 408）。
+        #   现在改成「文字左锚 + 按钮右锚」，这里把它钉住。
+        p0 = newbtn.mapToScene(QPointF(0, 0))
+        right = p0.x() + newbtn.width()
+        panel = find_item(win, "modPanelRoot")
+        panel_x = panel.mapToScene(QPointF(0, 0)).x() if panel else 0.0
+        sidebar_right = panel_x + 160        # page.sideW
+        check("★ 新建按钮没超出侧边栏右界",
+              right <= sidebar_right + 1,
+              f"右边界 {right:.1f} vs 侧栏 {sidebar_right:.1f}")
+        check("新建按钮左边界也在侧栏内",
+              p0.x() >= panel_x, f"{p0.x():.1f} vs {panel_x:.1f}")
     ok = click(win, newbtn)
     check("点得动", ok is True)
     dlg = find_obj(win, "catMgrDlg")
@@ -197,22 +213,31 @@ def main() -> int:
             continue
         if v is False:
             continue
-        if 16 <= w <= 20 and 18 <= h <= 22:
+        # ★ 这块是「⋯」的容器（catTrail）：34 宽、20 高（右边让出 34px 给按钮）。
+        #   早期是 18 宽，和 cma 缩进的量对不上会留缝。
+        if 32 <= w <= 36 and 18 <= h <= 22:
             p0 = it.mapToScene(QPointF(0, 0))
             cand.append((it, p0.x(), p0.y(), w, h))
 
-    check("侧边栏里能找到「⋯」那块小方块（18~20 宽）",
-          len(cand) > 0, f"候选 {len(cand)} 个")
+    check("侧边栏里能找到「⋯」那块（34x20）", len(cand) > 0,
+          f"候选 {len(cand)} 个")
     dlg = find_obj(win, "catMgrDlg")
     hit = False
     for it, x, y, w, h in cand:
-        pt = QPoint(int(x + w / 2), int(y + h / 2))
+        # ★ 先 hover 到行内（不压住「⋯」），让整行 hover 成立 ——
+        #   这一步证明 hover 不再被子控件抢走。
+        row_pt = QPoint(int(x - 40), int(y + h / 2))
+        if 0 <= row_pt.x() < win.width():
+            QTest.mouseMove(win, row_pt)
+            wait(250)
+        # 再移到「⋯」上点下去
+        pt = QPoint(int(x + w - 15), int(y + h / 2))
         if not (0 <= pt.x() < win.width() and 0 <= pt.y() < win.height()):
             continue
         QTest.mouseMove(win, pt)
-        wait(120)
+        wait(300)
         QTest.mouseClick(win, Qt.LeftButton, Qt.NoModifier, pt)
-        wait(220)
+        wait(250)
         if dlg is not None and bool(dlg.property("opened")) \
                 and panel is not None \
                 and str(panel.property("catMgrKey")) == key_del:
@@ -221,7 +246,7 @@ def main() -> int:
         if dlg is not None and bool(dlg.property("opened")):
             dlg.close()
             wait(120)
-    check("★ 按坐标点到了「⋯」，弹窗带的是那个分类", hit is True,
+    check("★ 点「⋯」能打开管理弹窗（hover 不再自锁）", hit is True,
           f"试了 {len(cand)} 个候选")
     check("分类名回填进输入框",
           str(panel.property("catMgrName")) == "临时测试分类",
@@ -287,6 +312,25 @@ def main() -> int:
     check("只有自建分类显示「⋯」（内置的不给改）",
           'indexOf("u_") === 0' in qml_src)
     check("删除前有二次确认", "page.askDeleteCategory()" in qml_src)
+    # ★ hover 不能再依赖整行 MouseArea 的 containsMouse —— 那会和「⋯」
+    #   自己的 MouseArea 互相抢，导致按钮闪一下就没、点击被丢弃
+    #   （用户报的「还是没办法删除分类」）。
+    check("hover 用 HoverHandler，不依赖 cma.containsMouse",
+          "HoverHandler { id: rowHover }" in qml_src
+          and "readonly property bool hovered: rowHover.hovered" in qml_src)
+    # ★ 只查代码行：注释里保留「不能这么写」的说明是有价值的。
+    qml_code = [ln.strip() for ln in qml_src.splitlines()
+                if ln.strip() and not ln.strip().startswith("//")]
+    check("「⋯」不再写 enabled: shown（那会自锁）",
+          not any("enabled: shown" in ln for ln in qml_code),
+          [ln for ln in qml_code if "enabled: shown" in ln][:2])
+    check("整行 MouseArea 给「⋯」让出右端",
+          "anchors.rightMargin: (parent.custom ? 34 : 0)" in qml_src)
+    # 新建按钮的布局：不能再用「Row + leftPadding + 弹性 Item」
+    head = qml_src.split('objectName: "modCatNewBtn"', 1)[0]
+    check("标题行不再用 leftPadding 撑布局",
+          "leftPadding: 8" not in head[-900:],
+          head[-200:].replace("\n", " "))
 
     print()
     # ---------------------------------------------------- 7. 告警

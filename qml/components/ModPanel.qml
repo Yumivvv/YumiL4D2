@@ -910,31 +910,41 @@ Item {
             // 「分类」标题 + 「新建」入口
             //
             // ★ 以前这里只有一行静态文字「分类」，建了分类之后**没有任何地方
-            //   能改名或删除** —— 后端 `createCategory` / `renameCategory` /
-            //   `deleteCategory` 三个都在，但 QML 里一次都没调过，
-            //   所以用户「建错了的分类只能一直留着」。用户报的就是这个。
-            Row {
+            //   能改名或删除** —— 后端三个方法都在，但 QML 里一次都没调过。
+            //
+            // ★★ 布局必须用**锚定**，不能用「Row + 弹性 Item」：
+            //   原来写的是
+            //       Row { width: sideCol.width; leftPadding: 8
+            //             Text{...}; Item{ width: parent.width - 68 }; 按钮(52) }
+            //   `leftPadding` 让内容整体右移 8，而弹性 Item 又按 Row 的
+            //   **整宽**去减 —— 两者叠加后总宽 = 8 + 文字 + 80 + 52，
+            //   比 sideCol.width(148) 多了十几像素，按钮直接顶出侧边栏
+            //   （用户报的「新建按钮走出 UI 外面」）。
+            //   改成「文字左锚 + 按钮右锚」，谁都不会越界。
+            Item {
+                id: catHeadRow
                 width: sideCol.width
                 height: 22
-                leftPadding: 8
 
                 Text {
+                    anchors.left: parent.left
+                    anchors.leftMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
                     text: "分类"
                     color: Theme.textMute
                     font.family: Theme.uiFont
                     font.pixelSize: 11
-                    anchors.verticalCenter: parent.verticalCenter
                 }
 
-                Item { width: Math.max(0, parent.width - 68); height: 1 }
-
-                // 新建分类（放在标题行右端，不占分类列表的宽度）
+                // 新建分类（贴右边界，宽度固定 52）
                 Rectangle {
                     objectName: "modCatNewBtn"
+                    anchors.right: parent.right
+                    anchors.rightMargin: 2
+                    anchors.verticalCenter: parent.verticalCenter
                     width: 52
                     height: 18
                     radius: 9
-                    anchors.verticalCenter: parent.verticalCenter
                     color: newCatMa.containsMouse
                            ? Qt.rgba(Theme.accent.r, Theme.accent.g,
                                      Theme.accent.b, 0.22)
@@ -1000,6 +1010,7 @@ Item {
             Repeater {
                 model: page.qCats
                 delegate: Rectangle {
+                    id: catRow
                     required property var modelData
                     width: sideCol.width
                     height: 28
@@ -1011,17 +1022,24 @@ Item {
                     //   自建的一律 `u_` 开头。
                     readonly property bool custom: String(modelData.key || "")
                                                     .indexOf("u_") === 0
-                    // ★ hover 用整行那个 MouseArea 的 containsMouse 就好 ——
-                    //   它铺满整行、hoverEnabled: true，指针进这一行就为真。
-                    //   早期版本让「⋯」自己的小 MouseArea 也参与判定
-                    //   （`cma.containsMouse || catMoreMa.containsMouse`），
-                    //   结果小 MouseArea 一出现就把 hover 从 cma 手里抢走、
-                    //   containsMouse 变 false → 按钮消失 → 又轮到 cma → 闪烁。
-                    //   只用 cma 一个来源就没这个循环。
-                    readonly property bool hovered: cma.containsMouse
+                    // ★★ hover 必须用 **HoverHandler**，不能用
+                    //   `cma.containsMouse`：
+                    //
+                    //   「⋯」那颗小按钮要靠 hover 才显形，而它的 MouseArea
+                    //   一出现就会把 hover 从整行的 cma 手里抢走 →
+                    //   cma.containsMouse 变 false → hovered 变 false →
+                    //   opacity 归 0 且 `enabled` 也归 0 → 那一刻点击被丢弃。
+                    //   结果就是「⋯ 闪一下就没了，点它没反应」——
+                    //   用户报的「还是没办法删除分类」就是这个。
+                    //
+                    //   HoverHandler 只看**指针是否落在这个 Item 的几何范围内**，
+                    //   子项抢不抢都不影响，所以不会自锁。
+                    readonly property bool hovered: rowHover.hovered
                     color: on ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)
                               : (hovered ? Theme.scrim(0.05) : "transparent")
                     Behavior on color { ColorAnimation { duration: 90 } }
+
+                    HoverHandler { id: rowHover }
 
                     Rectangle {
                         anchors.left: parent.left
@@ -1048,42 +1066,53 @@ Item {
                     }
 
                     // 右端：自建分类悬停时显示「⋯」（数量让位给它）
+                    //
+                    // ★ 这块占**最右 34px**，和上面 `cma` 的
+                    //   `anchors.rightMargin: 34` 严丝合缝地对接：
+                    //   左边 34px 之外归整行点击，右边这 34px 归「⋯」。
+                    //   以前 catTrail 右边距是 8、宽 18（只占 26px），
+                    //   和 cma 缩进的量对不上，中间会留缝 ——
+                    //   落在缝里的点击谁也接不到。
                     Item {
                         id: catTrail
                         objectName: "modCatTrail_" + modelData.key
                         anchors.right: parent.right
-                        anchors.rightMargin: 8
+                        anchors.rightMargin: 0
                         anchors.verticalCenter: parent.verticalCenter
-                        width: 18
+                        width: 34
                         height: 20
                         z: 2
 
                         Text {
                             anchors.right: parent.right
+                            anchors.rightMargin: 10
                             anchors.verticalCenter: parent.verticalCenter
-                            visible: !(parent.parent.custom && parent.parent.hovered)
+                            visible: !(catRow.custom && catRow.hovered)
                             text: modelData.count
-                            color: parent.parent.on ? Theme.accent : Theme.textMute
+                            color: catRow.on ? Theme.accent : Theme.textMute
                             font.family: Theme.uiFont
                             font.pixelSize: 11
                         }
 
                         // 「⋯」→ 重命名 / 删除
                         //
-                        // ★ 不用 `visible:` 控制显隐，而用 `opacity` + `enabled`：
-                        //   `visible: false` 的 Item 在 Qt 里**不参与命中测试**，
-                        //   而且测试里也拿不到有效几何（宽高会是 0）。
-                        //   用透明度隐藏，按钮一直在那儿、只是看不见，
-                        //   鼠标移上来（整行 hover）才显出颜色 ——
-                        //   这样「点得到」这件事从头到尾都成立。
+                        // ★ 用 `opacity` 控制显隐，不用 `visible`：
+                        //   `visible: false` 的 Item 不参与命中测试。
+                        //   但**绝不能同时写 `enabled: shown`** ——
+                        //   shown 依赖 hover，而 hover 一旦被子控件影响就会
+                        //   自锁（按钮变灰的一瞬间点击被丢弃）。这里保持
+                        //   enabled 常真，只是看不见而已。
                         Rectangle {
                             objectName: "modCatMoreBtn"
-                            anchors.fill: parent
+                            anchors.right: parent.right
+                            anchors.rightMargin: 4
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 22
+                            height: 20
                             radius: 4
-                            readonly property bool shown: parent.parent.custom
-                                                          && parent.parent.hovered
+                            readonly property bool shown: catRow.custom
+                                                          && catRow.hovered
                             opacity: shown ? 1 : 0
-                            enabled: shown
                             color: catMoreMa.containsMouse
                                    ? Theme.scrim(0.16) : "transparent"
                             Text {
@@ -1108,17 +1137,16 @@ Item {
                     MouseArea {
                         id: cma
                         anchors.fill: parent
+                        // ★ 自建分类要把右端那 34px 让给「⋯」：
+                        //   整行 MouseArea 铺满的话会抢走点击，
+                        //   「⋯」自己的 MouseArea 永远收不到（这就是
+                        //   「点了没反应」的另一半原因）。
+                        //   这里用 anchors.rightMargin 把 cma 缩进去 ——
+                        //   点击落在右边那条缝里时，自然由「⋯」接住。
+                        anchors.rightMargin: (parent.custom ? 34 : 0)
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        // 点在「⋯」区域时不要顺手把分类也切了
-                        onClicked: function (mouse) {
-                            if (parent.custom && parent.hovered
-                                    && mouse.x >= parent.width - 34) {
-                                page.openCategoryManager(modelData.key);
-                                return;
-                            }
-                            page.mgr.setCategory(modelData.key);
-                        }
+                        onClicked: page.mgr.setCategory(modelData.key)
                     }
                 }
             }
