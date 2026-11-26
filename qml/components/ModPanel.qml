@@ -63,6 +63,15 @@ Item {
     property string catNewName: ""        // 「新建分类」输入框里的草稿
     property string catPickerError: ""    // 选择器里的红字提示
 
+    // ---- 分类管理弹窗（新建 / 改名 / 删除）
+    property string catMgrKey: ""         // 空 = 新建；否则是正在管理的分类 key
+    property string catMgrName: ""        // 输入框里的名字
+    property string catMgrError: ""       // 红字提示
+    property var catMgrInfo: ({})         // {key,label,custom,builtin,count}
+    property string catDelKey: ""         // 待删除的分类 key
+    property string catDelLabel: ""       // 待删除的分类名（确认框里显示）
+    property int catDelCount: 0           // 这个分类下有几个 MOD
+
     // ---- 导入确认框里的勾选（默认全选，用户可以取消掉不要的）
     property var importPicked: []
 
@@ -455,6 +464,89 @@ Item {
         catPicker.open();
     }
 
+    // ---- 分类管理（新建 / 改名 / 删除）----
+    //
+    // ★ key 为空 = 「新建」；有 key = 管理那个已有的分类。
+    //   以前后端 createCategory / renameCategory / deleteCategory 三个都有，
+    //   但界面**没有任何入口** —— 用户建错了的分类删不掉，只能一直留着。
+    function openCategoryManager(key) {
+        if (!page.mgr) return;
+        page.catMgrKey = String(key || "");
+        page.catMgrError = "";
+        if (page.catMgrKey === "") {
+            // 新建：输入框清空，标题显示「新建分类」
+            page.catMgrName = "";
+            page.catMgrInfo = ({ key: "", label: "", custom: true,
+                                 builtin: false, count: 0 });
+        } else {
+            var info = page.mgr.categoryInfo(page.catMgrKey);
+            page.catMgrInfo = info || ({});
+            page.catMgrName = String((info && info.label) || "");
+        }
+        catMgrDlg.open();
+    }
+
+    function catMgrIsNew() {
+        return page.catMgrKey === "";
+    }
+
+    function submitCategoryManager() {
+        if (!page.mgr) return;
+        var name = String(page.catMgrName || "").trim();
+        if (!name) {
+            page.catMgrError = "先给分类起个名字";
+            return;
+        }
+        if (page.catMgrIsNew()) {
+            var r = page.mgr.createCategory(name);
+            if (!r || !r.ok) {
+                page.catMgrError = (r && r.error) || "新建失败";
+                return;
+            }
+            catMgrDlg.close();
+            return;
+        }
+        // 改名：没变就直接关
+        if (name === String((page.catMgrInfo || {}).label || "")) {
+            catMgrDlg.close();
+            return;
+        }
+        var r2 = page.mgr.renameCategory(page.catMgrKey, name);
+        if (!r2 || !r2.ok) {
+            page.catMgrError = (r2 && r2.error) || "改名失败";
+            return;
+        }
+        catMgrDlg.close();
+    }
+
+    // 删分类要二次确认（不是删 MOD，但会把这些 MOD 的手动归类清掉）
+    function askDeleteCategory() {
+        if (!page.mgr || page.catMgrIsNew()) return;
+        page.catDelKey = page.catMgrKey;
+        page.catDelLabel = String((page.catMgrInfo || {}).label || "");
+        // ★ QML 的 JS 里**没有 `int()`** —— 那是 Python/Java 的写法。
+        //   写了会抛 `ReferenceError: int is not defined`，函数从这里断掉，
+        //   确认框压根不弹（表现就是「点删除没反应」）。用 Number() 再取整。
+        page.catDelCount = Math.round(Number(
+            (page.catMgrInfo || {}).count || 0) || 0);
+        // ★ 先把管理弹窗关掉再弹确认框：两个 modal Popup 叠在一起时，
+        //   下面那个会被上面的半透明遮罩压暗，看起来像「弹窗坏了两层」。
+        catMgrDlg.close();
+        catDelDlg.open();
+    }
+
+    function doDeleteCategory() {
+        if (!page.mgr || !page.catDelKey) return;
+        var r = page.mgr.deleteCategory(page.catDelKey);
+        catDelDlg.close();
+        catMgrDlg.close();
+        if (!r || !r.ok) {
+            core.showToast((r && r.error) || "删除失败", "warn");
+            return;
+        }
+        page.catDelKey = "";
+    }
+
     function chooseCategory(key) {
         if (!page.mgr || !page.qSelected.path) return;
         var r = page.mgr.setModCategory(page.qSelected.path, key);
@@ -815,14 +907,68 @@ Item {
 
             Item { width: 1; height: 10 }
 
-            Text {
-                text: "分类"
-                color: Theme.textMute
-                font.family: Theme.uiFont
-                font.pixelSize: 11
+            // 「分类」标题 + 「新建」入口
+            //
+            // ★ 以前这里只有一行静态文字「分类」，建了分类之后**没有任何地方
+            //   能改名或删除** —— 后端 `createCategory` / `renameCategory` /
+            //   `deleteCategory` 三个都在，但 QML 里一次都没调过，
+            //   所以用户「建错了的分类只能一直留着」。用户报的就是这个。
+            Row {
+                width: sideCol.width
+                height: 22
                 leftPadding: 8
-                topPadding: 4
-                bottomPadding: 4
+
+                Text {
+                    text: "分类"
+                    color: Theme.textMute
+                    font.family: Theme.uiFont
+                    font.pixelSize: 11
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Item { width: Math.max(0, parent.width - 68); height: 1 }
+
+                // 新建分类（放在标题行右端，不占分类列表的宽度）
+                Rectangle {
+                    objectName: "modCatNewBtn"
+                    width: 52
+                    height: 18
+                    radius: 9
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: newCatMa.containsMouse
+                           ? Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                     Theme.accent.b, 0.22)
+                           : Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                     Theme.accent.b, 0.10)
+                    border.width: 1
+                    border.color: Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                          Theme.accent.b, 0.4)
+                    Row {
+                        anchors.centerIn: parent
+                        spacing: 3
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "\uE710"      // Add
+                            font.family: Theme.iconFont
+                            font.pixelSize: 8
+                            color: Theme.accent
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "新建"
+                            color: Theme.accent
+                            font.family: Theme.uiFont
+                            font.pixelSize: 10
+                        }
+                    }
+                    MouseArea {
+                        id: newCatMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: page.openCategoryManager(null)
+                    }
+                }
             }
 
             Rectangle {
@@ -859,38 +1005,120 @@ Item {
                     height: 28
                     radius: Theme.radiusXS
                     property bool on: page.qCategory === modelData.key
-                    color: on ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, cma.pressed ? 0.26 : 0.16)
-                              : (cma.pressed ? Theme.scrim(0.11)
-                                             : (cma.containsMouse ? Theme.scrim(0.05) : "transparent"))
+                    // ★ 只有**自建**分类能改名 / 删除（内置分类有固定含义，
+                    //   后端也会拒绝，见 `M.CATEGORY_LABELS`）。
+                    //   内置分类的 key 都是 `weapon` / `map` 这类词，
+                    //   自建的一律 `u_` 开头。
+                    readonly property bool custom: String(modelData.key || "")
+                                                    .indexOf("u_") === 0
+                    // ★ hover 用整行那个 MouseArea 的 containsMouse 就好 ——
+                    //   它铺满整行、hoverEnabled: true，指针进这一行就为真。
+                    //   早期版本让「⋯」自己的小 MouseArea 也参与判定
+                    //   （`cma.containsMouse || catMoreMa.containsMouse`），
+                    //   结果小 MouseArea 一出现就把 hover 从 cma 手里抢走、
+                    //   containsMouse 变 false → 按钮消失 → 又轮到 cma → 闪烁。
+                    //   只用 cma 一个来源就没这个循环。
+                    readonly property bool hovered: cma.containsMouse
+                    color: on ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)
+                              : (hovered ? Theme.scrim(0.05) : "transparent")
                     Behavior on color { ColorAnimation { duration: 90 } }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 2
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 3
+                        height: 14
+                        radius: 2
+                        visible: parent.on
+                        color: Theme.accent
+                    }
+
                     Text {
                         anchors.left: parent.left
                         anchors.leftMargin: 13
-                        anchors.right: catCount.left
+                        anchors.right: catTrail.left
                         anchors.rightMargin: 8
                         anchors.verticalCenter: parent.verticalCenter
                         text: modelData.label
                         elide: Text.ElideRight
-                        color: parent.on ? Theme.text : (cma.containsMouse ? Theme.text : Theme.textDim)
+                        color: parent.on ? Theme.text : (parent.hovered ? Theme.text : Theme.textDim)
                         font.family: Theme.uiFont
                         font.pixelSize: 12
                     }
-                    Text {
-                        id: catCount
+
+                    // 右端：自建分类悬停时显示「⋯」（数量让位给它）
+                    Item {
+                        id: catTrail
+                        objectName: "modCatTrail_" + modelData.key
                         anchors.right: parent.right
                         anchors.rightMargin: 8
                         anchors.verticalCenter: parent.verticalCenter
-                        text: modelData.count
-                        color: parent.on ? Theme.accent : Theme.textMute
-                        font.family: Theme.uiFont
-                        font.pixelSize: 11
+                        width: 18
+                        height: 20
+                        z: 2
+
+                        Text {
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: !(parent.parent.custom && parent.parent.hovered)
+                            text: modelData.count
+                            color: parent.parent.on ? Theme.accent : Theme.textMute
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                        }
+
+                        // 「⋯」→ 重命名 / 删除
+                        //
+                        // ★ 不用 `visible:` 控制显隐，而用 `opacity` + `enabled`：
+                        //   `visible: false` 的 Item 在 Qt 里**不参与命中测试**，
+                        //   而且测试里也拿不到有效几何（宽高会是 0）。
+                        //   用透明度隐藏，按钮一直在那儿、只是看不见，
+                        //   鼠标移上来（整行 hover）才显出颜色 ——
+                        //   这样「点得到」这件事从头到尾都成立。
+                        Rectangle {
+                            objectName: "modCatMoreBtn"
+                            anchors.fill: parent
+                            radius: 4
+                            readonly property bool shown: parent.parent.custom
+                                                          && parent.parent.hovered
+                            opacity: shown ? 1 : 0
+                            enabled: shown
+                            color: catMoreMa.containsMouse
+                                   ? Theme.scrim(0.16) : "transparent"
+                            Text {
+                                anchors.centerIn: parent
+                                text: "\uE712"      // More
+                                font.family: Theme.iconFont
+                                font.pixelSize: 10
+                                color: catMoreMa.containsMouse
+                                       ? Theme.accent : Theme.textDim
+                                visible: parent.opacity > 0
+                            }
+                            MouseArea {
+                                id: catMoreMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: page.openCategoryManager(modelData.key)
+                            }
+                        }
                     }
+
                     MouseArea {
                         id: cma
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: page.mgr.setCategory(modelData.key)
+                        // 点在「⋯」区域时不要顺手把分类也切了
+                        onClicked: function (mouse) {
+                            if (parent.custom && parent.hovered
+                                    && mouse.x >= parent.width - 34) {
+                                page.openCategoryManager(modelData.key);
+                                return;
+                            }
+                            page.mgr.setCategory(modelData.key);
+                        }
                     }
                 }
             }
@@ -4702,6 +4930,206 @@ Item {
                     accent: false
                     label: "取消"
                     onClicked: catPicker.close()
+                }
+            }
+        }
+    }
+
+    // ==================================================================== 分类管理
+    //
+    // 新建 / 改名 / 删除三合一。
+    // ★ 以前后端三个方法都写好了，但界面**一个入口都没有** —— 用户建错了的
+    //   分类只能一直挂着（用户报的「这边遗留了分类不知道怎么删除」）。
+    Popup {
+        id: catMgrDlg
+        objectName: "catMgrDlg"
+        anchors.centerIn: Overlay.overlay
+        width: 360
+        padding: 18
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+        background: Rectangle {
+            radius: Theme.radius
+            color: Theme.surfaceHi
+            border.width: 1
+            border.color: Theme.borderHi
+        }
+
+        Column {
+            width: parent.width
+            spacing: 10
+
+            Text {
+                width: parent.width
+                text: page.catMgrIsNew() ? "新建分类" : "管理分类"
+                color: Theme.text
+                font.family: Theme.uiFont
+                font.pixelSize: 14
+                font.weight: Font.DemiBold
+            }
+
+            // 已有分类时说明它影响了多少条
+            Text {
+                width: parent.width
+                visible: !page.catMgrIsNew()
+                text: "「" + ((page.catMgrInfo || {}).label || "")
+                      + "」里有 " + ((page.catMgrInfo || {}).count || 0) + " 个 MOD"
+                color: Theme.textMute
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
+            }
+
+            // 名字输入框
+            Item {
+                width: parent.width
+                height: 32
+                Rectangle {
+                    anchors.fill: parent
+                    radius: Theme.radiusXS
+                    color: Theme.surfaceSoft
+                    border.width: 1
+                    border.color: catMgrField.activeFocus ? Theme.accent
+                                                          : Theme.border
+                }
+                TextInput {
+                    id: catMgrField
+                    objectName: "catMgrField"
+                    anchors.fill: parent
+                    leftPadding: 10
+                    rightPadding: 10
+                    verticalAlignment: TextInput.AlignVCenter
+                    clip: true
+                    color: Theme.text
+                    font.family: Theme.uiFont
+                    font.pixelSize: 12
+                    selectByMouse: true
+                    maximumLength: 20
+                    text: page.catMgrName
+                    onTextChanged: page.catMgrName = text
+                    onAccepted: page.submitCategoryManager()
+                    Text {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: catMgrField.text.length === 0
+                        text: "分类名（最多 20 字）"
+                        color: Theme.textMute
+                        font.family: Theme.uiFont
+                        font.pixelSize: 11
+                    }
+                }
+            }
+
+            Text {
+                width: parent.width
+                visible: page.catMgrError.length > 0
+                text: page.catMgrError
+                color: Theme.warn
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
+            }
+
+            // 删除说明：说清「删的是这一栏，不是这些 MOD」
+            Text {
+                width: parent.width
+                visible: !page.catMgrIsNew()
+                text: "删除只会去掉这一栏，里面的 MOD 不会删，"
+                      + "它们会按文件名 / 工坊标签重新自动归类。"
+                color: Theme.textMute
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
+                lineHeight: 1.4
+            }
+
+            Row {
+                width: parent.width
+                spacing: 8
+                ActionButton {
+                    objectName: "catMgrDeleteBtn"
+                    height: 32
+                    accent: false
+                    // 新建时没有可删的；内置分类后端也不给删
+                    visible: !page.catMgrIsNew()
+                    enabledBtn: (page.catMgrInfo || {}).custom === true
+                    label: "删除分类"
+                    onClicked: page.askDeleteCategory()
+                }
+                Item { width: Math.max(0, parent.width - 240); height: 1 }
+                ActionButton {
+                    height: 32
+                    accent: false
+                    label: "取消"
+                    onClicked: catMgrDlg.close()
+                }
+                ActionButton {
+                    objectName: "catMgrSaveBtn"
+                    height: 32
+                    label: page.catMgrIsNew() ? "新建" : "保存"
+                    onClicked: page.submitCategoryManager()
+                }
+            }
+        }
+    }
+
+    // 删分类前的确认（第二次确认：上面那颗按钮已经点过一次了）
+    Popup {
+        id: catDelDlg
+        objectName: "catDelDlg"
+        anchors.centerIn: Overlay.overlay
+        width: 340
+        padding: 18
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+        background: Rectangle {
+            radius: Theme.radius
+            color: Theme.surfaceHi
+            border.width: 1
+            border.color: Theme.borderHi
+        }
+
+        Column {
+            width: parent.width
+            spacing: 12
+
+            Text {
+                width: parent.width
+                text: "删除分类「" + page.catDelLabel + "」？"
+                color: Theme.text
+                font.family: Theme.uiFont
+                font.pixelSize: 14
+                font.weight: Font.DemiBold
+                wrapMode: Text.Wrap
+            }
+            Text {
+                width: parent.width
+                text: (page.catDelCount > 0
+                       ? "里面的 " + page.catDelCount + " 个 MOD 不会被删除，"
+                       : "这一栏是空的。")
+                      + "它们会按文件名 / 工坊标签重新自动归类。"
+                color: Theme.textMute
+                font.family: Theme.uiFont
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
+                lineHeight: 1.45
+            }
+            Row {
+                width: parent.width
+                spacing: 8
+                Item { width: Math.max(0, parent.width - 176); height: 1 }
+                ActionButton {
+                    height: 32
+                    accent: false
+                    label: "取消"
+                    onClicked: catDelDlg.close()
+                }
+                ActionButton {
+                    objectName: "catDelConfirmBtn"
+                    height: 32
+                    label: "确认删除"
+                    onClicked: page.doDeleteCategory()
                 }
             }
         }

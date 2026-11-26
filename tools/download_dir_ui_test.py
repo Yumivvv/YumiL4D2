@@ -68,6 +68,19 @@ def main() -> int:
 
     dl = core.downloads
 
+    # ---------------------------------------------------- 0. 先把配置归零
+    #
+    # ★ `guard.protect_user_data()` 会把用户真实的 `config.json` **复制**到
+    #   沙盒里（这样测试有真实配置可用）。所以 `download_dir` 可能已经带着
+    #   用户自己设过的目录（实测就是 `E:\mrxz`）——
+    #   不先清掉的话，「默认应该是 软件目录/downloads」这条断言必红。
+    #   这不是 bug，是测试假设错了。
+    if not dl.isDefaultDownloadDir:
+        dl.setDownloadDir("")
+        wait(300)
+    check("测前确认处在默认状态", dl.isDefaultDownloadDir is True,
+          dl.downloadDir)
+
     # ---------------------------------------------------- 1. 默认值
     print("=== 1. 默认落在软件目录下 ===")
     default = os.path.join(tmp, "downloads")

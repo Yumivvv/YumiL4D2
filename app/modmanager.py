@@ -1782,6 +1782,25 @@ class ModManager(QObject):
         return {"ok": False, "error": "没有这个分类"}
 
     @Slot(str, result="QVariantMap")
+    def categoryInfo(self, key: str) -> dict:
+        """这个分类的「名称 / 是不是自建 / 有几个 MOD」——给管理弹窗显示用。
+
+        ★ 删分类前必须让用户知道**会影响多少条**。只说「删除分类」太轻了，
+          而实际上那些 MOD 会从手动归类退回自动判断（分类可能变）。
+        """
+        k = str(key or "").strip()
+        if not k:
+            return {"key": "", "label": "", "custom": False, "count": 0,
+                    "builtin": False}
+        label = self._category_label(k)
+        custom = any(str(r.get("key") or "") == k
+                     for r in getattr(self, "_custom_categories", []))
+        count = sum(1 for m in (self._all_local + self._all_workshop)
+                    if str(m.get("category") or "") == k)
+        return {"key": k, "label": label, "custom": bool(custom),
+                "builtin": k in M.CATEGORY_LABELS, "count": count}
+
+    @Slot(str, result="QVariantMap")
     def deleteCategory(self, key: str) -> dict:
         """删掉一个自建分类。
 
