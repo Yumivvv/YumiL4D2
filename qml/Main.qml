@@ -4406,6 +4406,169 @@ Window {
                 }
 
                 Rectangle { width: parent.width; height: 1; color: Theme.border }
+
+                // ---- 下载位置 ----
+                //
+                // ★ 默认落在**软件目录**下的 `downloads/`（网盘 pan/、视频 video/）。
+                //   这里可以改到任意目录 —— C 盘紧张的人可以直接下到 D 盘。
+                //
+                // ★ 配置里存的是「空串 = 用默认」，不是绝对路径：绿色版软件
+                //   可能被整个文件夹搬走 / 改盘符，存死路径会让下载直接失败。
+                //
+                // ★ 改目录**不会**自动搬文件 —— 几百 MB 的搬动不该被「改个设置」
+                //   隐式触发。旧目录里还有东西时，底下会多出一行提示 + 一颗
+                //   「一起搬过去」的按钮，让用户自己决定。
+                Column {
+                    objectName: "downloadDirSection"
+                    width: parent.width
+                    spacing: 8
+
+                    Row {
+                        width: parent.width
+                        spacing: 6
+                        Text {
+                            text: "下载位置"
+                            color: Theme.textDim
+                            font.family: Theme.uiFont
+                            font.pixelSize: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Text {
+                            objectName: "downloadDirState"
+                            text: core.downloads.isDefaultDownloadDir
+                                  ? "默认（软件目录下）" : "自定义"
+                            color: core.downloads.isDefaultDownloadDir
+                                   ? Theme.textMute : Theme.ok
+                            font.family: Theme.uiFont
+                            font.pixelSize: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+
+                    // 当前路径（可选中复制）
+                    Rectangle {
+                        width: parent.width
+                        height: 34
+                        radius: Theme.radiusXS
+                        color: Theme.surfaceSoft
+                        border.width: 1
+                        border.color: Theme.border
+
+                        TextEdit {
+                            objectName: "downloadDirText"
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            verticalAlignment: TextEdit.AlignVCenter
+                            readOnly: true
+                            selectByMouse: true
+                            clip: true
+                            color: Theme.textDim
+                            font.family: Theme.monoFont
+                            font.pixelSize: 11
+                            text: core.downloads.downloadDir
+                            wrapMode: TextEdit.NoWrap
+                        }
+                    }
+
+                    Row {
+                        width: parent.width
+                        spacing: 8
+
+                        ActionButton {
+                            objectName: "downloadDirChooseBtn"
+                            width: 132
+                            height: 30
+                            accent: false
+                            label: "选择文件夹…"
+                            onClicked: downloadDirDlg.open()
+                        }
+                        ActionButton {
+                            objectName: "downloadDirResetBtn"
+                            width: 116
+                            height: 30
+                            accent: false
+                            // 已经是默认了就没必要点
+                            enabledBtn: !core.downloads.isDefaultDownloadDir
+                            label: "恢复默认"
+                            onClicked: core.downloads.setDownloadDir("")
+                        }
+                        ActionButton {
+                            objectName: "downloadDirOpenBtn"
+                            width: 104
+                            height: 30
+                            accent: false
+                            label: "打开文件夹"
+                            onClicked: core.downloads.openDownloadDir()
+                        }
+                    }
+
+                    Text {
+                        width: parent.width
+                        text: "下载的网盘文件、B 站视频都放在这里（各自一个子文件夹："
+                              + "pan / video）。MOD 本体仍然直接进 addons 目录，不受影响。"
+                        wrapMode: Text.Wrap
+                        color: Theme.textMute
+                        font.family: Theme.uiFont
+                        font.pixelSize: 10
+                        lineHeight: 1.45
+                    }
+
+                    // 旧目录里还有东西时，问一句要不要一起搬
+                    Rectangle {
+                        objectName: "downloadDirMigrateBox"
+                        readonly property int pending: core.downloads.pendingCount
+                        width: parent.width
+                        height: visible ? (migTxt.height + 46) : 0
+                        visible: pending > 0
+                        radius: Theme.radiusXS
+                        color: Qt.rgba(Theme.warn.r, Theme.warn.g, Theme.warn.b, 0.10)
+                        border.width: 1
+                        border.color: Qt.rgba(Theme.warn.r, Theme.warn.g,
+                                              Theme.warn.b, 0.42)
+
+                        Column {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.margins: 9
+                            spacing: 7
+
+                            Text {
+                                id: migTxt
+                                width: parent.width
+                                text: "旧位置还有 " + parent.parent.pending
+                                      + " 个文件（共 "
+                                      + core.downloads.pendingSizeText
+                                      + "），要一起搬到新位置吗？"
+                                wrapMode: Text.Wrap
+                                color: Theme.warn
+                                font.family: Theme.uiFont
+                                font.pixelSize: 10
+                                lineHeight: 1.4
+                            }
+                            Row {
+                                spacing: 8
+                                ActionButton {
+                                    objectName: "downloadDirMigrateBtn"
+                                    width: 128
+                                    height: 28
+                                    label: "一起搬过去"
+                                    onClicked: core.downloads.migrateDownloads()
+                                }
+                                ActionButton {
+                                    width: 92
+                                    height: 28
+                                    accent: false
+                                    label: "先不搬"
+                                    onClicked: core.downloads.dismissMigrateHint()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { width: parent.width; height: 1; color: Theme.border }
                 Column {
                     width: parent.width
                     spacing: 8
@@ -6326,6 +6489,28 @@ Window {
                     s = s.substring(7);
                 try { s = decodeURIComponent(s); } catch (e) { }
                 core.importBgImage(s);
+            }
+        }
+
+        // ------------------------------------------------ 下载位置：选文件夹
+        //
+        // 用 FolderDialog（QtQuick.Dialogs）而不是自己画目录树 —— 系统对话框
+        // 能直接访问网络位置、能新建文件夹，比自己搓的稳。
+        //
+        // ★ URL → 本地路径的转换逻辑和上面 `bgDlg` 完全一样（去掉 file:///
+        //   前缀 + decodeURIComponent），中文路径不解码会变成 %E4%B8%AD…
+        FolderDialog {
+            id: downloadDirDlg
+            objectName: "downloadDirDlg"
+            title: "选择下载文件夹"
+            onAccepted: {
+                var s = String(selectedFolder);
+                if (s.indexOf("file:///") === 0)
+                    s = s.substring(8);
+                else if (s.indexOf("file://") === 0)
+                    s = s.substring(7);
+                try { s = decodeURIComponent(s); } catch (e) { }
+                core.downloads.setDownloadDir(s);
             }
         }
 

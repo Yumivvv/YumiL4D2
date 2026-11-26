@@ -95,6 +95,7 @@ DEFAULT_SUITE = [
     "servers_test",
     "downloads_test",
     "downloads_remove_test",
+    "download_dir_ui_test",
     "pan_link_expire_test",
     "fixes_test",
     "ws_download_test",

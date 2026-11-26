@@ -331,10 +331,19 @@ class DownloadManager(QObject):
     def __init__(self, core) -> None:
         super().__init__(core)
         self.core = core
+        # 配置：下载目录存在这里（`download_dir`）。和 ModManager 共用同一份
+        # Config 对象，避免两处各持一份、改了一边另一边看不到。
+        cfg = getattr(core, "config", None)
+        if cfg is None:
+            from .store import Config
+            cfg = Config()
+        self._cfg = cfg
         self._tasks: dict[str, DownloadTask] = {}
         self._order: list[str] = []         # 显示顺序：新的在前
         self._lock = threading.Lock()
         self._closed = False
+        # 「先不搬」标记：这次运行内不再提示迁移（不改配置，下次开还会问）
+        self._migrate_dismissed = False
         self._log_path = DOWNLOAD_LOG
         self._tick.connect(self._on_tick)
         self._settled.connect(self._on_settled)
@@ -681,7 +690,9 @@ class DownloadManager(QObject):
         except Exception:                     # noqa: BLE001
             rec = {}
         title = str(rec.get("title") or bvid)
-        dest = os.path.join(util.ROOT, "downloads", "video")
+        # ★ 落点走 `video_dir()`：默认软件目录/downloads/video，
+        #   但用户在设置里改过下载位置的话就跟着走。
+        dest = self.video_dir()
         task = DownloadTask(
             kind="video", title=title, dest=dest,
             subtitle=f"B 站视频 {bvid}",
@@ -766,7 +777,7 @@ class DownloadManager(QObject):
         name = str(info.get("name") or "网盘文件")
         label = str(info.get("label") or "").strip()
         title = label or name
-        dest = os.path.join(util.ROOT, "downloads", "pan")
+        dest = self.pan_dir()
         task = DownloadTask(
             kind="pan", title=title, dest=dest,
             subtitle=f"{name} 直链" + ("（带提取码）" if info.get("code") else ""),
@@ -965,17 +976,270 @@ class DownloadManager(QObject):
             self._set_status(f"已移除并删除文件：{os.path.basename(drop_path)}")
         self._changed()
 
+    # ------------------------------------------------------------ 下载位置
+    #
+    # ★ 默认落在**软件目录**下的 `downloads/`（网盘在 `pan/`、视频在 `video/`）。
+    #   用户可以在设置里改成任意目录 —— 比如 C 盘紧张、想直接下到 D 盘。
+    #
+    # ★ 配置里存空串表示「用默认」。不存绝对路径的原因：绿色版软件
+    #   可能被整个文件夹搬走 / 改盘符，存死路径会让下载直接失败。
+    #
+    # ★ 布局保持一致（`<root>/pan`、`<root>/video`），这样换目录之后
+    #   「哪些东西是该删的」判断逻辑不用改 —— `_download_roots()` 跟着换根就行。
+    DEFAULT_DOWNLOAD_DIR_NAME = "downloads"
+
+    def _default_download_root(self) -> str:
+        return os.path.join(str(getattr(util, "ROOT", "") or ""),
+                            self.DEFAULT_DOWNLOAD_DIR_NAME)
+
+    def downloadRoot(self) -> str:
+        """当前下载根目录（绝对路径）。配置为空时用软件目录下的 downloads/。"""
+        raw = ""
+        try:
+            raw = str(self._cfg["download_dir"] or "").strip()
+        except (KeyError, TypeError):
+            raw = ""
+        # ★ 配的目录不存在（换机器 / 手动删了）就退回默认，别让下载全废。
+        #   但**不自动清空配置** —— 那个盘可能只是暂时没挂上（U 盘 / 移动硬盘）。
+        if raw:
+            try:
+                os.makedirs(raw, exist_ok=True)
+                return os.path.abspath(raw)
+            except OSError as e:
+                _log(f"download dir unusable {raw!r}: {e!r}")
+        return os.path.abspath(self._default_download_root())
+
+    def pan_dir(self) -> str:
+        return os.path.join(self.downloadRoot(), "pan")
+
+    def video_dir(self) -> str:
+        return os.path.join(self.downloadRoot(), "video")
+
+    # ---------------------------------------------------------- 给界面用的属性
+    @Property(str, notify=downloadsChanged)
+    def downloadDir(self) -> str:
+        """当前下载根目录（绝对路径），设置页直接显示它。"""
+        return self.downloadRoot()
+
+    @Property(bool, notify=downloadsChanged)
+    def isDefaultDownloadDir(self) -> bool:
+        """现在是默认位置吗（决定「恢复默认」那颗按钮是否可点）。"""
+        try:
+            raw = str(self._cfg["download_dir"] or "").strip()
+        except (KeyError, TypeError):
+            raw = ""
+        return not raw
+
+    @Property(int, notify=downloadsChanged)
+    def pendingCount(self) -> int:
+        """旧目录里还能搬的文件数（0 = 不显示那条提示）。
+
+        ★ 点了「先不搬」之后返回 0 —— 不然那条橙色提示会一直杵在设置页里，
+          用户已经明确表达过「这次不搬」了。
+        """
+        if getattr(self, "_migrate_dismissed", False):
+            return 0
+        return len(self.pendingDownloadFiles())
+
+    @Property(str, notify=downloadsChanged)
+    def pendingSizeText(self) -> str:
+        """旧目录里待搬文件的总大小（人话）。"""
+        try:
+            total = sum(int(p.get("size") or 0) for p in self.pendingDownloadFiles())
+        except (TypeError, ValueError):
+            total = 0
+        return util.human_size(total)
+
+    @Slot()
+    def dismissMigrateHint(self) -> None:
+        """用户点了「先不搬」：这次运行内不再提示（不改配置，下次开还会问）。"""
+        self._migrate_dismissed = True
+        self.downloadsChanged.emit()
+
+    @Slot(result="QVariantMap")
+    def openDownloadDir(self) -> dict:
+        """打开当前下载目录（不存在就先建出来）。"""
+        d = self.downloadRoot()
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)  # noqa: S606 - 就是要打开资源管理器
+            return {"ok": True, "path": d}
+        except OSError as e:
+            self._toast(f"打不开目录：{e}", "warn")
+            return {"ok": False, "path": d, "error": str(e)}
+
+    @Slot(str, result="QVariantMap")
+    def setDownloadDir(self, path: str) -> dict:
+        """设置下载目录。空串 = 恢复默认（软件目录下的 downloads/）。
+
+        返回 `{ok, dir, error}`。**只改配置、不搬文件** ——
+        搬不搬由用户决定（见 `migrateDownloads`），因为几百 MB 的搬动
+        不该被「改个设置」这种动作隐式触发。
+        """
+        raw = str(path or "").strip()
+        if raw:
+            try:
+                os.makedirs(raw, exist_ok=True)
+            except OSError as e:
+                msg = f"这个目录建不出来：{e}"
+                self._toast(msg, "error")
+                return {"ok": False, "dir": self.downloadRoot(), "error": msg}
+            if not os.access(raw, os.W_OK):
+                msg = "这个目录没有写入权限"
+                self._toast(msg, "error")
+                return {"ok": False, "dir": self.downloadRoot(), "error": msg}
+        try:
+            self._cfg["download_dir"] = os.path.abspath(raw) if raw else ""
+            self._cfg.save()
+        except OSError as e:
+            msg = f"保存设置失败：{e}"
+            self._toast(msg, "error")
+            return {"ok": False, "dir": self.downloadRoot(), "error": msg}
+        new_dir = self.downloadRoot()
+        # 换了目录就重新允许提示「旧文件要不要搬」—— 用户刚才点了「先不搬」
+        # 是针对**上一个**目录的，不该一直压着。
+        self._migrate_dismissed = False
+        self._set_status(f"下载目录已改为：{new_dir}")
+        self._toast("下载目录已更新", "ok")
+        self.downloadsChanged.emit()
+        return {"ok": True, "dir": new_dir, "error": ""}
+
+    @Slot(result="QVariantList")
+    def pendingDownloadFiles(self) -> list:
+        """旧下载目录里**还在、且可以被搬走**的文件（给「要不要一起搬」提示用）。
+
+        返回 `[{name, path, size, isPan}]`。只统计当前配置之外的目录、
+        并且确实存在的文件 —— 用户看到「有 3 个文件，要一起搬过去吗」
+        才是有意义的。
+        """
+        cur = os.path.normcase(self.downloadRoot())
+        out: list[dict] = []
+        for root in self._all_download_roots():
+            norm = os.path.normcase(root)
+            if norm == cur:
+                continue
+            # 只收根目录或 pan/video 这一层的文件，不递归到用户自己建的子目录
+            for sub in ("", "pan", "video"):
+                d = os.path.join(root, sub) if sub else root
+                if not os.path.isdir(d):
+                    continue
+                try:
+                    names = os.listdir(d)
+                except OSError:
+                    continue
+                for name in names:
+                    p = os.path.join(d, name)
+                    if not os.path.isfile(p):
+                        continue
+                    try:
+                        size = os.path.getsize(p)
+                    except OSError:
+                        size = 0
+                    out.append({"name": name, "path": p, "size": size,
+                                "isPan": sub == "pan" or sub == "video"})
+        return out
+
+    @Slot(result="QVariantMap")
+    def migrateDownloads(self) -> dict:
+        """把旧下载目录里的文件搬到**当前**目录。返回 `{ok, moved, skipped, error}`。
+
+        ★ 重名不覆盖：目标已有同名文件就跳过（和 `import_files` 一个原则，
+          绝不悄悄覆盖用户的东西）。
+        ★ 搬完删掉空的旧目录（只删 pan/video 这层空壳，不递归删别的东西）。
+        """
+        import shutil
+
+        target_root = self.downloadRoot()
+        moved: list[str] = []
+        skipped: list[str] = []
+        errors: list[str] = []
+        for item in self.pendingDownloadFiles():
+            src = str(item.get("path") or "")
+            name = str(item.get("name") or "")
+            if not src or not os.path.isfile(src):
+                continue
+            # 目标目录：盘/视频各自归位（按它原来在 pan/ 还是 video/ 判断）
+            sub = ""
+            norm = os.path.normcase(os.path.abspath(src))
+            for root in self._all_download_roots():
+                r = os.path.normcase(os.path.abspath(root))
+                for s in ("pan", "video"):
+                    if norm.startswith(os.path.normcase(
+                            os.path.join(root, s)) + os.sep):
+                        sub = s
+                        break
+                if sub:
+                    break
+                if os.path.normcase(os.path.dirname(norm)) == r:
+                    sub = ""
+                    break
+            dst_dir = os.path.join(target_root, sub) if sub else target_root
+            try:
+                os.makedirs(dst_dir, exist_ok=True)
+            except OSError as e:
+                errors.append(f"{name}: {e}")
+                continue
+            dst = os.path.join(dst_dir, name)
+            if os.path.exists(dst):
+                skipped.append(name)
+                continue
+            try:
+                shutil.move(src, dst)
+                moved.append(name)
+            except (OSError, shutil.Error) as e:
+                errors.append(f"{name}: {e}")
+        # 清掉搬空的旧目录（只清 pan/ video/ 和它们自己，不递归）
+        for root in self._all_download_roots():
+            if os.path.normcase(root) == os.path.normcase(target_root):
+                continue
+            for d in (os.path.join(root, "pan"), os.path.join(root, "video"), root):
+                try:
+                    if os.path.isdir(d) and not os.listdir(d):
+                        os.rmdir(d)
+                except OSError:
+                    pass
+        msg = f"已转移 {len(moved)} 个文件"
+        if skipped:
+            msg += f"，{len(skipped)} 个同名跳过"
+        if errors:
+            msg += f"，{len(errors)} 个失败"
+        self._set_status(msg)
+        self._toast(msg, "ok" if moved else "info")
+        self.downloadsChanged.emit()
+        return {"ok": bool(moved) or not errors, "moved": moved,
+                "skipped": skipped, "errors": errors,
+                "error": "" if not errors else errors[0]}
+
+    def _all_download_roots(self) -> list[str]:
+        """所有**可能**存过下载产物的根目录（当前 + 默认）。
+
+        ★ 为什么要两个：用户改过目录之后，旧目录里可能还躺着上次下的东西。
+          「哪些文件该跟着记录一起删」「要不要一起搬走」都得把旧目录算进来，
+          否则那些文件就成了永远没人管的孤儿。
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        for p in (self.downloadRoot(), self._default_download_root()):
+            try:
+                n = os.path.normcase(os.path.abspath(p))
+            except (TypeError, ValueError):
+                continue
+            if n and n not in seen:
+                seen.add(n)
+                out.append(n)
+        return out
+
     # ------------------------------------------------------------ 删除的辅助
     # 这些是「下载产物」的存放地。只有**落在这些目录下**的文件才允许跟着
     # 记录一起删 —— 防止 dest 指向别处（比如用户手动选的目录）时误删。
     def _download_roots(self) -> list[str]:
-        root = str(getattr(util, "ROOT", "") or "")
         out = []
-        for sub in ("downloads", os.path.join("downloads", "pan"),
-                    os.path.join("downloads", "video")):
-            p = os.path.normcase(os.path.abspath(os.path.join(root, sub)))
-            if p:
-                out.append(p)
+        for root in self._all_download_roots():
+            for sub in ("", "pan", "video"):
+                p = os.path.normcase(os.path.abspath(
+                    os.path.join(root, sub) if sub else root))
+                if p and p not in out:
+                    out.append(p)
         return out
 
     def _should_delete_file(self, task) -> bool:
