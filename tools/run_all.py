@@ -62,6 +62,7 @@ DEFAULT_SUITE = [
     "mod_category_ui_test",
     "mod_category_width_test",
     "category_manage_test",
+    "empty_category_test",
     "import_pick_test",
     "import_pick_ui_test",
     "workshop_page_test",

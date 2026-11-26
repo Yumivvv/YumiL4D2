@@ -42,6 +42,17 @@ Item {
     readonly property var qCats: mgr ? mgr.categoryCounts : []
     readonly property int qStatusFilter: mgr ? mgr.statusFilter : 0
     readonly property string qCategory: mgr ? mgr.categoryFilter : ""
+    // 当前选中分类的**显示名**（空分类的空状态提示要用它）。
+    // ★ 不能在 QML 里按 key 反查 `M.CATEGORY_LABELS`（那是 Python 的），
+    //   从 qCats 里找、找不到就退回 key 本身。
+    readonly property string qCategoryLabel: {
+        if (!page.qCategory) return "";
+        var cats = page.qCats || [];
+        for (var i = 0; i < cats.length; ++i)
+            if (String(cats[i].key) === page.qCategory)
+                return String(cats[i].label || page.qCategory);
+        return page.qCategory;
+    }
     readonly property var qSelected: mgr ? mgr.selectedItem : ({})
     readonly property real qMinMB: mgr ? mgr.minMB : 0
     readonly property real qMaxMB: mgr ? mgr.maxMB : 0
@@ -2344,8 +2355,18 @@ Item {
                 anchors.centerIn: parent
                 visible: grid.count === 0
                 horizontalAlignment: Text.AlignHCenter
-                text: page.qScanned ? "这里没有符合条件的 MOD\n换个分类或者清掉筛选试试"
-                                    : "还没有 MOD 目录\n在「设置 → MOD 目录」里检测一下"
+                // ★ 三种空状态要分开说，否则用户分不清「分类是空的」和
+                //   「筛选筛没了」：
+                //     · 选了某个分类、且这个分类 0 条 → 「这个分类里还没有 MOD」
+                //       （自建分类刚建出来就是这样，用户会以为界面坏了）
+                //     · 有筛选条件 → 「换个分类或清掉筛选」
+                //     · 还没扫过盘 → 「还没有 MOD 目录」
+                text: !page.qScanned
+                      ? "还没有 MOD 目录\n在「设置 → MOD 目录」里检测一下"
+                      : (page.qCategory.length > 0
+                         ? "「" + page.qCategoryLabel + "」里还没有 MOD\n" +
+                           "把 MOD 归到这个分类后就会出现在这里"
+                         : "这里没有符合条件的 MOD\n换个分类或者清掉筛选试试")
                 color: Theme.textMute
                 font.family: Theme.uiFont
                 font.pixelSize: 12

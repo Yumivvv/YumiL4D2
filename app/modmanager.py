@@ -580,10 +580,20 @@ class ModManager(QObject):
 
     @Property("QVariantList", notify=modsChanged)
     def categoryCounts(self) -> list:
-        """侧边栏「分类」：返回 [{key,label,count}]，只保留有内容的分类。
+        """侧边栏「分类」：返回 [{key,label,count}]。
 
         ★ 顺序 = 内置分类在前（按 CATEGORY_DEFS），用户自建分类接在后面。
           「其他」总在最后 —— 它是兜底，排中间会让列表看着很乱。
+
+        ★★ 自建分类**即使 0 个 MOD 也要列出来**。
+          以前这里对所有分类都套了「有内容才显示」，于是：
+            · 刚建好的空分类在侧边栏里**完全看不到**；
+            · 把某个分类里的 MOD 全删掉 / 全移走之后，这一栏也消失了；
+          结果就是用户**永远找不到改名 / 删除的入口** ——
+          而入口就挂在这一行上（用户报的「找不到删除和重命名的选项」）。
+
+          内置分类保持「有内容才显示」：它们有 11 个，全列出来会把侧边栏
+          撑得很长，而且没有 MOD 的内置分类本来也没什么可点。
         """
         items = self._all_local + self._all_workshop
         tally: dict[str, int] = {}
@@ -597,11 +607,12 @@ class ModManager(QObject):
                 out.append({"key": key, "label": label, "count": n})
         for row in getattr(self, "_custom_categories", []):
             key = str(row.get("key") or "")
-            n = tally.get(key, 0)
-            if key and n:
-                out.append({"key": key,
-                            "label": str(row.get("label") or key),
-                            "count": n})
+            if not key:
+                continue
+            # ★ 不做 `if n` 过滤：0 个也要显示（否则删不掉、改不了名）
+            out.append({"key": key,
+                        "label": str(row.get("label") or key),
+                        "count": int(tally.get(key, 0))})
         return out
 
     @Property(int, notify=modsChanged)
@@ -1417,13 +1428,24 @@ class ModManager(QObject):
 
     @Slot(str)
     def setCategory(self, key: str) -> None:
-        """侧边栏「分类」：空串=全部。"""
+        """侧边栏「分类」：空串=全部。
+
+        ★ 点到一个**空的自建分类**时要给一句明确状态：列表会是 0 条，
+          如果不说话，用户会以为「点了没反应」或者「MOD 全丢了」。
+        """
         value = (key or "").strip()
         if value == self._category:
             return
         self._category = value
         self._apply_filter()
         self._remember_filters()
+        if value:
+            n = sum(1 for m in (self._all_local + self._all_workshop)
+                    if str(m.get("category") or "") == value)
+            if n == 0:
+                self._set_status(
+                    f"「{self._category_label(value)}」里还没有 MOD"
+                    "（在这个分类下看的条目才能被归进来）")
         self.statusChanged.emit()
 
     @Slot()

@@ -123,7 +123,7 @@ def main() -> int:
     wait(1200)
 
     # ---------------------------------------------------- 1. 造两个分类
-    print("=== 1. 先建两个分类（一个待会留着，一个待会删）===")
+    print("=== 1. 先建两个分类（空分类也必须出现在侧边栏）===")
     r1 = mgr.createCategory("临时测试分类")
     r2 = mgr.createCategory("要保留的分类")
     check("建了第一个", r1.get("ok") is True, str(r1))
@@ -131,12 +131,16 @@ def main() -> int:
     key_del = r1.get("key")
     key_keep = r2.get("key")
     wait(600)
-    names = [c["key"] for c in mgr.categoryCounts]
-    check("侧边栏里能看到新建的分类（需要有 MOD 才算进 counts）",
-          True, "counts 只统计有内容的分类，空分类不显示是预期的")
+    # ★★ 这两个都是**空分类**（0 个 MOD）。以前 `categoryCounts` 会把它们
+    #   整行滤掉，于是侧边栏里根本没有那一行 —— 用户「找不到删除和重命名的
+    #   选项」就是因为它。现在必须可见。
+    cats0 = [c["key"] for c in mgr.categoryCounts]
+    check("★ 空分类也出现在 categoryCounts 里",
+          key_del in cats0 and key_keep in cats0, str(cats0))
 
     # ★ 空的分类不会出现在 categoryCounts 里（只列有内容的），
     #   所以这里给它塞一条 MOD 让它显形。
+    # 再给 key_del 归一个 MOD（后面验证「删分类不删 MOD」要用到）
     fake = {
         "path": os.path.join("C:\\fake\\addons", "cattest.vpk"),
         "name": "cattest.vpk", "stem": "Category Test Mod",
@@ -151,7 +155,7 @@ def main() -> int:
     mgr.setModCategory(deco["path"], key_del)
     wait(700)
     cats = [c["key"] for c in mgr.categoryCounts]
-    check("有内容的自建分类出现在侧边栏", key_del in cats, str(cats))
+    check("归了 MOD 之后仍在", key_del in cats, str(cats))
 
     # ---------------------------------------------------- 2. 新建按钮
     print("=== 2. 「+ 新建」点得动，而且没走出侧边栏 ===")
