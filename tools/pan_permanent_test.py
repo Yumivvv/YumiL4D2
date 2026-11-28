@@ -150,15 +150,32 @@ def main() -> int:
               str(real.get("expireTag") or "") == "",
               repr(real.get("expireTag")))
 
-    # 对照组：有真期限的那条必须还是「N 天后」
+    # 对照组：有真期限的那条，必须**仍然是个正常分享**（没被哨兵判定误伤）。
+    #
+    # ★ 这里以前断言「必须是 N 天后到期」。那是墙钟依赖：那条分享到期的
+    #   绝对时刻是固定的，跑测试时如果它只剩几个小时，正确结果本来就会变成
+    #   「N 小时后到期」—— 断言一红就看起来像回归，其实是测试写死了。
+    #   （实测：2026-11-28 18:xx 跑，它只剩 4 小时。）
+    #
+    #   要盯的语义其实是两条：
+    #     1. 没被当成「永久」（expireAt 还在、不是 0）；
+    #     2. 没被当成「已过期」（state 仍是 ok）；
+    #   只要这两条成立，哨兵判定就没有误伤它 —— 至于说的是「天」还是「小时」，
+    #   由 expire_tag 按剩余时长自己决定。
     ct = PS.check("https://pan.quark.cn/s/a96b2f056eae")
     if ct.get("state") == "unknown":
         skip("对照组（有期限的分享）", "接口不可达")
     else:
-        check("对照组仍有天数", int(ct.get("expireDays") or 0) > 0,
-              ct.get("expireDays"))
-        check("对照组仍显示「天后到期」",
-              "天后到期" in str(ct.get("expireTag")), ct.get("expireTag"))
+        check("对照组仍是个正常分享（没被误判成永久）",
+              int(ct.get("expireAt") or 0) > 0, ct.get("expireAt"))
+        check("对照组没被误判成过期", ct.get("state") == "ok", ct.get("state"))
+        check("对照组有角标（不是空的）",
+              str(ct.get("expireTag") or "") != "", repr(ct.get("expireTag")))
+        # 文案必须落在「天后 / 小时后 / 1 小时内」这三档之一 —— 不许再出现
+        # 「今天到期」那种模糊说法，也不许没有单位。
+        tag = str(ct.get("expireTag") or "")
+        check("对照组文案是明确的时长",
+              any(u in tag for u in ("天后到期", "小时后到期", "小时内到期")), tag)
 
     # ---------------------------------------------- 5. 老数据（library.json 里存过 26700）
     print("=== 5. 老数据里已经存了 26700 天的，读出来也要正常 ===")

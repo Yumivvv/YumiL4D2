@@ -92,6 +92,138 @@ _lock = threading.Lock()
 _cache: dict[str, Any] = {"at": 0.0, "data": None, "err": ""}
 _api_dll_cache: str | None = None
 
+# 只认 Valve 自己签名的 steam_api64.dll（见 `_dll_is_genuine` 的长注释）。
+STEAM_DLL_SIGNER = "valve"
+# WinVerifyTrust 的返回码里，这几个不代表「文件坏了」，只是我们主动关掉的检查。
+_TRUST_OK = 0
+_TRUST_E_NOSIGNATURE = 0x800B0100
+
+
+def _dll_company(path: str) -> str:
+    """读文件版本信息里的 CompanyName —— **不加载 DLL**，纯读资源。"""
+    try:
+        import ctypes as _ct
+        ver = _ct.windll.version
+        size = ver.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return ""
+        buf = _ct.create_string_buffer(size)
+        if not ver.GetFileVersionInfoW(path, 0, size, buf):
+            return ""
+        ptr = _ct.c_void_p()
+        ln = _ct.c_uint()
+        for lang in (0x040904B0, 0x040904E4, 0x080404B0):
+            if ver.VerQueryValueW(buf, f"\\StringFileInfo\\{lang:08X}\\CompanyName",
+                                  _ct.byref(ptr), _ct.byref(ln)) and ptr.value:
+                return _ct.wstring_at(ptr.value)[:80]
+    except Exception:  # noqa: BLE001 —— 读不到版本信息就当没有
+        pass
+    return ""
+
+
+def _trust_ok(path: str) -> bool:
+    """文件是否有**受信任的签名**（WinVerifyTrust，全程不弹框、不联网）。
+
+    ★ 为什么必须用 `WTD_UI_NONE`：默认的 UIChoice 会在签名无效时**弹窗**，
+      那正是我们要避免的东西。这里永远静默，只拿返回码。
+    """
+    try:
+        import ctypes as _ct
+        import ctypes.wintypes as _wt
+
+        class _GUID(_ct.Structure):
+            _fields_ = [("Data1", _wt.DWORD), ("Data2", _wt.WORD),
+                        ("Data3", _wt.WORD), ("Data4", _ct.c_ubyte * 8)]
+
+        class _FileInfo(_ct.Structure):
+            _fields_ = [("cbStruct", _wt.DWORD), ("pcwszFilePath", _wt.LPCWSTR),
+                        ("hFile", _wt.HANDLE), ("pgKnownSubject", _ct.c_void_p)]
+
+        class _TrustData(_ct.Structure):
+            _fields_ = [
+                ("cbStruct", _wt.DWORD), ("pPolicyCallbackData", _ct.c_void_p),
+                ("pSIPClientData", _ct.c_void_p), ("dwUIChoice", _wt.DWORD),
+                ("fdwRevocationChecks", _wt.DWORD), ("dwUnionChoice", _wt.DWORD),
+                ("pFile", _ct.c_void_p), ("dwStateAction", _wt.DWORD),
+                ("hWVTStateData", _wt.HANDLE), ("pwszURLReference", _wt.LPCWSTR),
+                ("dwProvFlags", _wt.DWORD), ("dwUIContext", _wt.DWORD),
+            ]
+
+        action = _GUID()
+        buf = _ct.create_unicode_buffer(39)
+        _ct.windll.ole32.CLSIDFromString(
+            _ct.c_wchar_p("{00AAC56B-CD44-11d0-8CC2-00C04FC295EE}"), buf)
+        _ct.memmove(_ct.byref(action), buf, _ct.sizeof(action))
+
+        fi = _FileInfo()
+        fi.cbStruct = _ct.sizeof(fi)
+        fi.pcwszFilePath = os.path.abspath(path)
+
+        td = _TrustData()
+        td.cbStruct = _ct.sizeof(td)
+        td.dwUIChoice = 2            # WTD_UI_NONE —— 绝不弹框
+        td.fdwRevocationChecks = 0   # WTD_REVOKE_NONE —— 不联网查吊销
+        td.dwUnionChoice = 1         # WTD_CHOICE_FILE
+        td.pFile = _ct.cast(_ct.byref(fi), _ct.c_void_p)
+        td.dwStateAction = 1         # WTD_STATEACTION_VERIFY
+
+        wt_dll = _ct.windll.wintrust
+        code = wt_dll.WinVerifyTrust(None, _ct.byref(action), _ct.byref(td))
+        td.dwStateAction = 2         # WTD_STATEACTION_CLOSE —— 释放状态
+        wt_dll.WinVerifyTrust(None, _ct.byref(action), _ct.byref(td))
+        return code == _TRUST_OK
+    except Exception:  # noqa: BLE001 —— 验不了就当作不可信（宁可不用好友功能）
+        return False
+
+
+def _dll_is_genuine(path: str) -> bool:
+    """这个 `steam_api64.dll` 能不能安全加载进我们的进程？
+
+    ★★ 这是「打开软件就弹 socialclub.dll not found、点确定整个程序消失」的修复。
+
+    事故现象（用户报的，别人电脑上）：
+        打开软件 → 一个 Windows 原生对话框「socialclub.dll not found」
+        → 点「确定」→ 软件整个消失。
+
+    查到的根因：
+      `socialclub.dll` 是 Rockstar 的组件，本项目**从不碰它**，也**没有任何
+      原生弹框**（全项目搜不到 MessageBox）。唯一会把「外来 DLL」拉进我们进程的
+      地方就是这里 —— 以前这段代码按**文件大小**从所有游戏目录里挑一个
+      `steam_api64.dll` 直接 `LoadLibraryExW` 进来。
+
+      而很多整合包 / 破解补丁会**替换**游戏目录里的 `steam_api64.dll`
+      （GTA、RDR2、以及各种「学习版」游戏里尤其常见）。这种改版 DLL 的
+      `DllMain` 会去找它自己的依赖（典型就是 `socialclub.dll`），找不到就
+      **弹一个原生 MessageBox**，用户一点确定它再 `TerminateProcess()` ——
+      死的是**我们的进程**。
+
+      所以「按大小挑最大的那个」这条策略本身就是错的：它恰好会优先挑到
+      体积更大的改版 DLL。
+
+    修法：**加载前验签**。真的 steam_api64.dll 一定是 Valve 签名的，
+    改版 / 破解的必然验不过（签名被改就失效）。两道关都要过：
+
+      1. `WinVerifyTrust` 返回 0（签名链可信）；
+      2. 版本信息里的 CompanyName 含 `Valve`。
+
+    验不过就跳过、继续找下一个；全都验不过就**不启用好友功能**
+    （`open()` 返回 False，界面照常工作，只是没有「好友在玩」）。
+
+    ★ 为什么不用 `AddDllDirectory` / 改搜索路径：DllMain 的依赖是它自己
+      按自己的路径去找的，我们控制不了。唯一的防线就是「别把这个文件加载进来」。
+    """
+    if not os.path.isfile(path):
+        return False
+    if not _trust_ok(path):
+        log(f"reject (untrusted signature): {path}")
+        return False
+    company = _dll_company(path).lower()
+    if STEAM_DLL_SIGNER not in company:
+        log(f"reject (signer company={company!r}): {path}")
+        return False
+    return True
+
+
 
 class FriendGameInfo(ctypes.Structure):
     """对应 Steamworks 的 FriendGameInfo_t（布局不能改）。"""
@@ -169,28 +301,59 @@ def _library_roots(steam_root: str) -> list[str]:
 
 
 def find_steam_api_dll(steam_root: str = "") -> str:
-    """找一个可用的 steam_api64.dll。
+    """找一个**能安全加载**的 steam_api64.dll。
 
     Steam 根目录通常**没有**这个文件（它是游戏自带的），所以去各游戏目录里翻。
     找到第一个能用的就记住，避免每次都全盘扫。
+
+    ★★ 这里以前只按「文件大小」挑，是个真实的线上事故（见 `_dll_is_genuine`
+      的注释）：挑到的若是整合包/破解补丁替换过的改版 DLL，加载时它会弹
+      「socialclub.dll not found」，用户点确定后**我们的进程被它杀掉**。
+
+      现在每个候选都要过 `_dll_is_genuine()`（WinVerifyTrust + CompanyName）。
+      另外顺序也改了：**先找 L4D2 自己的**（它在 `common/Left 4 Dead 2/`，
+      改版概率最低且和游戏同源），再考虑别的游戏。
     """
     global _api_dll_cache
     if _api_dll_cache and os.path.isfile(_api_dll_cache):
         return _api_dll_cache
 
     root = steam_root or _steam_root()
-    # 先看根目录（少数发行版会放一份）
-    direct = os.path.join(root, "steam_api64.dll") if root else ""
-    if direct and os.path.isfile(direct):
-        _api_dll_cache = direct
-        return direct
 
-    # 游戏目录里翻。限制层级，别把整个盘扫一遍。
+    def try_accept(path: str) -> bool:
+        """通过就记进缓存并返回 True。"""
+        global _api_dll_cache
+        if not (os.path.isfile(path) and os.path.getsize(path) > 50_000):
+            return False
+        if not _dll_is_genuine(path):
+            return False
+        _api_dll_cache = path
+        log(f"steam_api64.dll -> {path}")
+        return True
+
+    # 1) Steam 根目录（少数发行版会放一份）
+    if root:
+        direct = os.path.join(root, "steam_api64.dll")
+        if os.path.isfile(direct) and try_accept(direct):
+            return direct
+
+    # 2) 游戏目录里翻。★ 先把 L4D2 排到最前面 —— 我们自己这个工具的 MOD 目录
+    #    就是 L4D2，用同款游戏自带的 DLL 语义上也最对。
     for lib in _library_roots(root):
         common = os.path.join(lib, "steamapps", "common")
         if not os.path.isdir(common):
             continue
-        # 优先找常见位置：<game>/steam_api64.dll、<game>/bin/、<game>/bin64/
+        l4d2 = os.path.join(common, "Left 4 Dead 2")
+        for sub in ("", "bin", "bin64", os.path.join("game", "bin", "win64")):
+            cand = os.path.join(l4d2, sub, "steam_api64.dll")
+            if os.path.isfile(cand) and try_accept(cand):
+                return cand
+
+    # 3) 其余游戏：按「常见位置优先」+「体积大的优先」翻，但每个都要验签。
+    for lib in _library_roots(root):
+        common = os.path.join(lib, "steamapps", "common")
+        if not os.path.isdir(common):
+            continue
         patterns = [
             os.path.join(common, "*", "steam_api64.dll"),
             os.path.join(common, "*", "bin", "steam_api64.dll"),
@@ -199,14 +362,14 @@ def find_steam_api_dll(steam_root: str = "") -> str:
         ]
         for pat in patterns:
             try:
-                hits = sorted(glob.glob(pat), key=lambda p: os.path.getsize(p), reverse=True)
+                hits = sorted(glob.glob(pat), key=lambda p: os.path.getsize(p),
+                              reverse=True)
             except OSError:
                 continue
             for h in hits:
-                if os.path.isfile(h) and os.path.getsize(h) > 50_000:
-                    _api_dll_cache = h
-                    log(f"steam_api64.dll -> {h}")
+                if try_accept(h):
                     return h
+    log("no genuine steam_api64.dll found (好友功能将不可用)")
     return ""
 
 
@@ -242,8 +405,13 @@ class _Steam:
             return False
         api_dll = find_steam_api_dll(root)
         if not api_dll:
-            self.err = ("找不到 steam_api64.dll。它一般在某个 64 位游戏的安装目录里，"
-                        "装过任意一款 64 位 Steam 游戏就会有")
+            # ★ 两种可能：一个是真没有；另一个是「有文件但验签不过」
+            #   （整合包 / 破解补丁替换过）。后者必须说清楚 —— 以前正是把它
+            #   加载进来才弹「socialclub.dll not found」并杀掉我们的进程。
+            self.err = ("没找到**Valve 正版签名**的 steam_api64.dll，好友功能已跳过"
+                        "（游戏目录里的那个可能被整合包/破解补丁替换过，"
+                        "加载它会导致本程序被它弹框并强制退出）。"
+                        "装一款原版 Steam 游戏后重试即可。")
             return False
 
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)

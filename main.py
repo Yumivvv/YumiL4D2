@@ -10,6 +10,42 @@ os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 # QtMultimedia 每次播放都会把 FFmpeg 的探测信息打到 stderr，噪音太大，压一下
 os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.ffmpeg=false;qt.multimedia.ffmpeg.*=false")
 
+
+def _silence_hard_error_boxes() -> None:
+    """把进程级的「硬错误弹框」关掉（Windows 默认那套）。
+
+    ★ 为什么需要：用户报「打开软件就弹 socialclub.dll not found，点确定后
+      整个程序消失」。那个框是**被加载进来的第三方 DLL**（游戏目录里被
+      整合包替换过的 steam_api64.dll）弹的 —— 它在 DllMain 里找不到自己的
+      依赖，就调 MessageBoxW，用户一点确定它再 TerminateProcess。
+
+      根因那侧已经修了（`steamfriends._dll_is_genuine()` 加载前验签，
+      不再把可疑 DLL 拉进进程）。这里再加一道**兜底**：
+
+        * `SEM_FAILCRITICALERRORS` —— 缺 DLL / 缺入口点时不再弹系统框，
+          而是让 LoadLibrary 直接返回错误码（我们本来就会处理）。
+        * `SEM_NOGPFAULTERRORBOX` —— 访问冲突等硬崩不再弹框，安静退出
+          （日志里有记录），避免用户以为「点了确定程序就没了」。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        SEM_FAILCRITICALERRORS = 0x0001
+        SEM_NOGPFAULTERRORBOX = 0x0002
+        SEM_NOOPENFILEERRORBOX = 0x8000
+        k32 = ctypes.windll.kernel32
+        # SetErrorMode 返回旧值；先读再按位或，避免覆盖掉外部已设的位
+        old = k32.SetErrorMode(0)
+        k32.SetErrorMode(old | SEM_FAILCRITICALERRORS
+                         | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX)
+    except Exception:                            # noqa: BLE001 —— 兜底失败不影响主流程
+        pass
+
+
+_silence_hard_error_boxes()
+
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Slot  # noqa: E402
 from PySide6.QtGui import QAction, QColor, QGuiApplication, QIcon  # noqa: E402
 from PySide6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402

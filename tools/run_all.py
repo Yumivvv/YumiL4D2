@@ -92,6 +92,7 @@ DEFAULT_SUITE = [
     "window_close_test",
     "friends_test",
     "friend_avatar_test",
+    "steam_dll_safety_test",
     "export_test",
     "onefile_paths_test",
     "servers_test",

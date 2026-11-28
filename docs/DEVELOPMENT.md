@@ -1151,7 +1151,50 @@ MyMemory 打瘸后腾讯要能顶上、两边都挂时最终报错里不许再�
 - 卡片高度 140：左侧**五行**（模式 18 / 名字 18 / 自报名 13 / 地址 14 / 好友 24
   + 间距 12 + 上下边距 12 = 111），右侧三块（人数 24 + 地图 14 + 信号 12）。
 
+#### ★ 加载第三方 `steam_api64.dll` 前必须验签（一次真实事故）
+
+用户报的现象：
+
+```
+打开软件 → 一个 Windows 原生对话框「socialclub.dll not found」
+         → 点「确定」→ 软件整个消失
+```
+
+**第一反应是「我们的弹框写错了」，但查下来不是**：全项目（Python + QML）
+搜不到任何 `MessageBox` / `MessageDialog`，也没有这句英文文案。框不是我们弹的。
+
+真正的链路是：`find_steam_api_dll()` 会去**任意游戏目录**里挑一个
+`steam_api64.dll`，然后 `LoadLibraryExW` 直接加载进**我们自己的进程**。
+而整合包 / 破解补丁很常见地把游戏目录里这个文件替换成改版 —— 改版 DLL 的
+`DllMain` 会去找它自己的依赖（典型就是 Rockstar 的 `socialclub.dll`），
+找不到就 `MessageBoxW` 弹原生框，用户一点确定它再 `TerminateProcess()`。
+**死的是我们的进程**，所以看起来像「本软件崩了」。
+
+更糟的是当时的挑选策略是 **「按文件体积从大到小」** —— 改版 DLL 往往比正版大，
+于是这个策略**恰好优先挑到最危险的那个**。
+
+修法（`app/steamfriends.py`）：
+
+| 关卡 | 做法 | 为什么 |
+| --- | --- | --- |
+| 签名 | `WinVerifyTrust`，返回 0 才算过 | 改版文件一改签名就失效，这是最硬的判据 |
+| 弹框 | `dwUIChoice = 2`（`WTD_UI_NONE`） | 验签 API 自己也会弹框，必须显式关掉 |
+| 联网 | `fdwRevocationChecks = 0` | 不为了验个本地文件去联网查吊销 |
+| 署名 | 版本信息 `CompanyName` 必须含 `Valve` | 双保险；读资源、**不加载** DLL |
+| 顺序 | 先把 `Left 4 Dead 2` 排最前 | 本工具的 MOD 目录就是 L4D2，同源最安全 |
+| 兜底 | 全都验不过 → **不启用好友功能** | 宁可少一个功能，不能让程序被别人的 DLL 杀掉 |
+
+另外在 `main.py` 里加了进程级兜底 `_silence_hard_error_boxes()`：
+`SetErrorMode` 置上 `SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX`，
+让 Windows 不再弹「缺 DLL / 缺入口点 / 硬崩」的系统框 —— 即使将来又遇到
+别的坏 DLL，也是安静失败 + 日志留痕，而不是「点确定程序就没了」。
+
+回归见 `tools/steam_dll_safety_test.py`（已进 run_all），它盯四件事：
+真 DLL 不许被误杀、假 DLL 必须被拒、**目录里只有假 DLL 时必须返回空串**、
+源码里不许再退回「只按大小挑」。
+
 #### 好友头像怎么来的（也是本地，不需要 API Key）
+
 
 `GetFriendPersonaName` 只给名字；头像要再走三步，全在同一个
 `steam_api64.dll` 里（实测导出齐全）：
