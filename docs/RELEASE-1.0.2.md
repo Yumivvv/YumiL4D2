@@ -110,6 +110,14 @@ ISteamUtils::GetImageRGBA(句柄, buf, n)  → BGRA
 
 ## 修复
 
+- **打开就弹「socialclub.dll not found」，点确定整个程序消失**（2026-11-28 热修）：
+  这个框**不是我们弹的**（全项目没有任何 MessageBox），而是读 Steam 好友时
+  把游戏目录里的 `steam_api64.dll` 直接加载进进程 —— 整合包/破解补丁替换过的
+  改版 DLL 会去找 Rockstar 的 `socialclub.dll`，找不到就弹原生框再
+  `TerminateProcess`，死的是我们。而且旧代码按**体积从大到小**挑，恰好优先
+  挑中最危险的那个。现在加载前必须过 `WinVerifyTrust` + 厂商名含 Valve，
+  验不过就跳过，全都验不过就不启用好友功能；另加进程级兜底让 Windows
+  不再弹这类系统框
 - **创意工坊「重新加载」按钮看得见、点不动**：`wsGrid` 是 `anchors.fill`、
   列表为空时仍然「可见」，把按钮的点击全吃了
 - **创意工坊一直转圈**：首屏失败的收尾没清 `loading` 状态，Spinner 永远不停，
