@@ -93,6 +93,8 @@ DEFAULT_SUITE = [
     "friends_test",
     "friend_avatar_test",
     "steam_dll_safety_test",
+    "steam_dll_e2e_test",
+    "exe_contains_fix_test",
     "export_test",
     "onefile_paths_test",
     "servers_test",
